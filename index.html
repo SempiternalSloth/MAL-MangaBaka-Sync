@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/x-icon" href="mb-mal.ico">
+    <title>MangaBaka to MAL Sync</title>
+    <script src="https://unpkg.com/fflate"></script>
+    <style>
+        body { background: #121212; color: #e0e0e0; font-family: 'Segoe UI', sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
+        .container { background: #1e1e1e; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.7); width: 100%; max-width: 500px; text-align: center; border: 1px solid #333; }
+        h2 { color: #2e51a2; margin-bottom: 25px; letter-spacing: 1px; }
+        .step { background: #252525; padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid #333; }
+        .links a { color: #888; font-size: 13px; text-decoration: none; margin: 0 12px; transition: 0.2s; }
+        .links a:hover { color: #2e51a2; }
+        input[type="file"] { margin: 10px 0; font-size: 12px; color: #888; width: 100%; cursor: pointer; }
+        
+        #previewContainer { background: #161616; text-align: left; margin-bottom: 15px; display: none; border-left: 4px solid #2e51a2; }
+        summary { cursor: pointer; padding: 10px; font-weight: bold; color: #2e51a2; outline: none; }
+        #changeList { padding: 0 10px 10px 10px; max-height: 200px; overflow-y: auto; font-size: 12px; color: #bbb; }
+        .change-item { padding: 5px 0; border-bottom: 1px solid #222; }
+
+        button { color: white; border: none; padding: 15px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.3); transition: 0.2s; }
+        #syncBtn { background: #2e51a2; width: 100%; }
+        #syncBtn:hover { background: #3c65c4; transform: translateY(-1px); }
+        #authBtn { background: #333; font-size: 12px; padding: 10px; border: 1px solid #444; }
+        #authBtn:hover { background: #444; }
+        
+        button:disabled { background: #444 !important; cursor: not-allowed; transform: none !important; }
+
+        #logBox { margin-top: 20px; background: #000; color: #00ff00; font-family: 'Consolas', monospace; font-size: 11px; text-align: left; padding: 12px; border-radius: 4px; height: 140px; overflow-y: auto; border: 1px solid #333; display: none; line-height: 1.4; }
+        .log-success { color: #00ff00; }
+        .log-error { color: #ff5555; }
+        .log-info { color: #55aaff; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>MangaBaka to MAL Sync</h2>
+        
+        <div class="step">
+            <div class="links">
+                <a href="https://mangabaka.org/my/library/export/mal" target="_blank">Export Baka</a>
+                <a href="https://myanimelist.net/panel.php?go=export" target="_blank">Export MAL</a>
+            </div>
+        </div>
+
+        <div class="step">
+            <label style="font-size:12px; color:#666; display:block; text-align:left;">UPLOAD MANGABAKA XML</label>
+            <input type="file" id="bakaFile" accept=".xml">
+            <label style="font-size:12px; color:#666; display:block; text-align:left; margin-top:10px;">UPLOAD MAL XML (.gz supported)</label>
+            <input type="file" id="malFile" accept=".xml,.gz">
+        </div>
+
+        <div id="previewContainer" class="step">
+            <details open>
+                <summary>Changes (<span id="changeCount">0</span>)</summary>
+                <div id="changeList"></div>
+            </details>
+        </div>
+
+        <div id="sessionInfo" style="display:none; font-size: 11px; margin-bottom: 10px; color: #888; text-align: left; padding: 8px 10px; background: #161616; border-radius: 4px; border: 1px solid #333; display: flex; align-items: center; justify-content: space-between;">
+            <span>Token expires in: <span id="expireTimer" style="color: #2e51a2; font-weight: bold;">...</span></span>
+            <a href="#" id="resetBtn" style="color: #ff5555; text-decoration: none;">[Reset Token]</a>
+        </div>
+
+        <div style="display: flex; gap: 10px; align-items: stretch;">
+            <button id="syncBtn" style="flex: 3;">Sync Lists</button>
+            <button id="authBtn" style="flex: 1;">Authorize</button>
+        </div>
+
+        <div id="logBox"></div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
