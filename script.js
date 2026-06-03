@@ -25,6 +25,37 @@ const fieldKeyMap = {
     'my_comments':      'comments'
 };
 
+// --- CORS Proxy Fallback List ---
+const CORS_PROXIES = [
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.org/?${encodeURIComponent(url)}`,
+    (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
+];
+
+let activeProxyIndex = 0;
+
+async function fetchWithFallback(url, options = {}, attempt = 0) {
+    if (attempt >= CORS_PROXIES.length) {
+        throw new Error('All CORS proxies exhausted. Try again later.');
+    }
+    const proxyIndex = (activeProxyIndex + attempt) % CORS_PROXIES.length;
+    const proxyUrl = CORS_PROXIES[proxyIndex](url);
+    try {
+        const response = await fetch(proxyUrl, options);
+        if (response.status === 429 || response.status === 503) {
+            logger(`Proxy ${proxyIndex + 1} rate limited, trying next...`, 'warn');
+            return fetchWithFallback(url, options, attempt + 1);
+        }
+        // Promote this proxy to active if it worked
+        activeProxyIndex = proxyIndex;
+        return response;
+    } catch (e) {
+        logger(`Proxy ${proxyIndex + 1} failed (${e.message}), trying next...`, 'warn');
+        return fetchWithFallback(url, options, attempt + 1);
+    }
+}
+
 const logBox = document.getElementById('logBox');
 const syncBtn = document.getElementById('syncBtn');
 const authBtn = document.getElementById('authBtn');
@@ -37,6 +68,7 @@ function logger(msg, type = 'info') {
     entry.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
     logBox.appendChild(entry);
     logBox.scrollTop = logBox.scrollHeight;
+    if (type === 'warn') console.warn(msg);
 }
 
 // --- Helper: PKCE ---
@@ -210,8 +242,7 @@ window.onload = async () => {
     if (code && verifier) {
         logger("Exchanging code for token...", "info");
         try {
-            const proxyUrl = 'https://corsproxy.io/?';
-            const response = await fetch(proxyUrl + encodeURIComponent('https://myanimelist.net/v1/oauth2/token'), {
+            const response = await fetchWithFallback('https://myanimelist.net/v1/oauth2/token', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams({
@@ -274,10 +305,9 @@ async function performSync(token) {
         console.log(`[${id}] ${title}`, payload);
 
         try {
-            const proxyUrl = 'https://corsproxy.io/?';
             const targetUrl = `https://api.myanimelist.net/v2/manga/${id}/my_list_status`;
             
-            const response = await fetch(proxyUrl + encodeURIComponent(targetUrl), {
+            const response = await fetchWithFallback(targetUrl, {
                 method: 'PUT',
                 headers: {
                     'Authorization': `Bearer ${token}`,
