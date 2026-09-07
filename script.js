@@ -27,7 +27,7 @@ const fieldKeyMap = {
 
 // --- CORS Proxy Fallback List ---
 const CORS_PROXIES = [
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url) => `sscors.sempiternalsloth.workers.dev?url=${encodeURIComponent(url)}`,
     (url) => `https://corsproxy.org/?${encodeURIComponent(url)}`,
     (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
 ];
