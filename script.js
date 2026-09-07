@@ -257,6 +257,7 @@ async function performSync(token) {
 
     syncBtn.disabled = true;
     logger(`Starting sync for ${entries.length} items...`, 'info');
+    console.group(`=== MAL Sync Raw Output — ${entries.length} entries ===`);
 
     for (const b of entries) {
         const id = b.querySelector('manga_mangadb_id').textContent.trim();
@@ -282,6 +283,8 @@ async function performSync(token) {
             if (val !== undefined && val !== '') payload[key] = val;
         });
 
+        console.log(`[${id}] ${title}`, payload);
+
         try {
             const response = await proxyFetch(`https://api.myanimelist.net/v2/manga/${id}/my_list_status`, {
                 method: 'PUT',
@@ -295,6 +298,7 @@ async function performSync(token) {
             const resultData = await response.json();
             if (response.ok) {
                 logger(`Synced: ${title}`, 'success');
+                console.log(`OK [${response.status}] ${title}:`, resultData);
             } else {
                 console.error(`FAILED [${response.status}] ${title}:`, resultData);
                 logger(`Failed: ${title} (${response.status}: ${resultData.message || resultData.error || 'Unknown'})`, 'error');
@@ -307,6 +311,7 @@ async function performSync(token) {
         await new Promise(r => setTimeout(r, 250));
     }
 
+    console.groupEnd();
     logger('Sync complete.', 'info');
     syncBtn.disabled = false;
 }
