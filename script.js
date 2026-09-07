@@ -27,7 +27,8 @@ const fieldKeyMap = {
 
 // --- CORS Proxy Fallback List ---
 const CORS_PROXIES = [
-    (url) => `sscors.sempiternalsloth.workers.dev?url=${encodeURIComponent(url)}`,
+    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url) => `https://corsproxy.org/?${encodeURIComponent(url)}`,
     (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
 ];
@@ -249,12 +250,7 @@ window.onload = async () => {
                     code: code, code_verifier: verifier, redirect_uri: REDIRECT_URI
                 })
             });
-            const rawText = await response.text();
-            console.log('Token exchange status:', response.status);
-            console.log('Token exchange raw response:', rawText);
-            let data;
-            try { data = JSON.parse(rawText); }
-            catch (e) { throw new Error(`Non-JSON response (status ${response.status}): ${rawText.slice(0, 200)}`); }
+            const data = await response.json();
             if (data.access_token) {
                 window.history.replaceState({}, document.title, REDIRECT_URI);
                 storeToken(data.access_token, data.expires_in);
