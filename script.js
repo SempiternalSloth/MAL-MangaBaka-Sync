@@ -249,7 +249,12 @@ window.onload = async () => {
                     code: code, code_verifier: verifier, redirect_uri: REDIRECT_URI
                 })
             });
-            const data = await response.json();
+            const rawText = await response.text();
+            console.log('Token exchange status:', response.status);
+            console.log('Token exchange raw response:', rawText);
+            let data;
+            try { data = JSON.parse(rawText); }
+            catch (e) { throw new Error(`Non-JSON response (status ${response.status}): ${rawText.slice(0, 200)}`); }
             if (data.access_token) {
                 window.history.replaceState({}, document.title, REDIRECT_URI);
                 storeToken(data.access_token, data.expires_in);
