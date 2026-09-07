@@ -1,6 +1,7 @@
 // --- CONFIGURATION ---
 const CLIENT_ID = 'b8dd7bad6b617b069d311f9efcd3b103';
 const REDIRECT_URI = 'https://sempiternalsloth.github.io/MAL-MangaBaka-Sync/';
+const PROXY = 'https://sscors.sempiternalsloth.workers.dev/?url=';
 
 const SYNC_FIELDS = [
     'my_read_chapters', 'my_read_volumes', 'my_status',
@@ -25,40 +26,14 @@ const fieldKeyMap = {
     'my_comments':      'comments'
 };
 
-// --- CORS Proxy Fallback List ---
-const CORS_PROXIES = [
-    (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-    (url) => `https://corsproxy.org/?${encodeURIComponent(url)}`,
-    (url) => `https://thingproxy.freeboard.io/fetch/${url}`,
-];
-
-let activeProxyIndex = 0;
-
-async function fetchWithFallback(url, options = {}, attempt = 0) {
-    if (attempt >= CORS_PROXIES.length) {
-        throw new Error('All CORS proxies exhausted. Try again later.');
-    }
-    const proxyIndex = (activeProxyIndex + attempt) % CORS_PROXIES.length;
-    const proxyUrl = CORS_PROXIES[proxyIndex](url);
-    try {
-        const response = await fetch(proxyUrl, options);
-        if (response.status === 429 || response.status === 503) {
-            logger(`Proxy ${proxyIndex + 1} rate limited, trying next...`, 'warn');
-            return fetchWithFallback(url, options, attempt + 1);
-        }
-        // Promote this proxy to active if it worked
-        activeProxyIndex = proxyIndex;
-        return response;
-    } catch (e) {
-        logger(`Proxy ${proxyIndex + 1} failed (${e.message}), trying next...`, 'warn');
-        return fetchWithFallback(url, options, attempt + 1);
-    }
-}
-
 const logBox = document.getElementById('logBox');
 const syncBtn = document.getElementById('syncBtn');
 const authBtn = document.getElementById('authBtn');
+
+// --- Helper: Proxy Fetch ---
+function proxyFetch(url, options = {}) {
+    return fetch(PROXY + encodeURIComponent(url), options);
+}
 
 // --- Helper: Logging ---
 function logger(msg, type = 'info') {
@@ -68,7 +43,6 @@ function logger(msg, type = 'info') {
     entry.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
     logBox.appendChild(entry);
     logBox.scrollTop = logBox.scrollHeight;
-    if (type === 'warn') console.warn(msg);
 }
 
 // --- Helper: PKCE ---
@@ -90,7 +64,6 @@ function getStoredToken() {
 
 function storeToken(token, expiresIn) {
     localStorage.setItem('mal_access_token', token);
-    // Buffer of 60 seconds
     localStorage.setItem('mal_token_expiry', Date.now() + ((expiresIn - 60) * 1000));
 }
 
@@ -108,16 +81,15 @@ function updateSessionUI() {
 
     if (expiry && Date.now() < expiry) {
         sessionDiv.style.display = 'flex';
-        authBtn.style.background = "#1a4a1a";
-        authBtn.innerText = "Logged In";
-        
+        authBtn.style.background = '#1a4a1a';
+        authBtn.innerText = 'Logged In';
+
         const update = () => {
-            const now = Date.now();
-            const diff = expiry - now;
+            const diff = expiry - Date.now();
             if (diff <= 0) {
                 sessionDiv.style.display = 'none';
-                authBtn.innerText = "Authorize";
-                authBtn.style.background = "#333";
+                authBtn.innerText = 'Authorize';
+                authBtn.style.background = '#333';
                 return;
             }
             const days = Math.floor(diff / 86400000);
@@ -128,7 +100,7 @@ function updateSessionUI() {
         update();
     } else {
         sessionDiv.style.display = 'none';
-        authBtn.innerText = "Authorize";
+        authBtn.innerText = 'Authorize';
     }
 }
 
@@ -138,10 +110,10 @@ async function analyzeFiles() {
     const malFile = document.getElementById('malFile').files[0];
     if (!bakaFile || !malFile) return;
 
-    logger("Analyzing files...", "info");
+    logger('Analyzing files...', 'info');
     try {
         const bakaText = await bakaFile.text();
-        const bakaXml = new DOMParser().parseFromString(bakaText, "text/xml");
+        const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
         const bakaEntries = Array.from(bakaXml.querySelectorAll('manga'));
 
         let malText;
@@ -153,30 +125,29 @@ async function analyzeFiles() {
             malText = await malFile.text();
         }
 
-        const malXml = new DOMParser().parseFromString(malText, "text/xml");
-        const malEntriesList = Array.from(malXml.querySelectorAll('manga'));
+        const malXml = new DOMParser().parseFromString(malText, 'text/xml');
         const malMap = new Map();
-        malEntriesList.forEach(m => {
+        Array.from(malXml.querySelectorAll('manga')).forEach(m => {
             const id = m.querySelector('manga_mangadb_id')?.textContent?.trim();
             if (id) malMap.set(id, m);
         });
 
-        let changes = [];
+        const changes = [];
         bakaEntries.forEach(b => {
             const id = b.querySelector('manga_mangadb_id')?.textContent?.trim();
-            if (!id || id === "0") return;
+            if (!id || id === '0') return;
 
             const title = b.querySelector('manga_title')?.textContent || `ID:${id}`;
             const mMatch = malMap.get(id);
-            let diffDetails = [];
-            let isNew = !mMatch;
+            const isNew = !mMatch;
+            const diffDetails = [];
 
             SYNC_FIELDS.forEach(f => {
-                const bVal = b.querySelector(f)?.textContent?.trim() || "";
-                const mVal = isNew ? "" : (mMatch.querySelector(f)?.textContent?.trim() || "");
+                const bVal = b.querySelector(f)?.textContent?.trim() || '';
+                const mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
 
-                const isBakaEmpty = (bVal === "0" || bVal === "" || bVal === "0000-00-00" || bVal === "Plan to Read");
-                const hasMalData = (mVal !== "0" && mVal !== "" && mVal !== "0000-00-00" && mVal !== "Plan to Read");
+                const isBakaEmpty = (bVal === '0' || bVal === '' || bVal === '0000-00-00' || bVal === 'Plan to Read');
+                const hasMalData = (mVal !== '0' && mVal !== '' && mVal !== '0000-00-00' && mVal !== 'Plan to Read');
 
                 if (bVal !== mVal) {
                     if (isBakaEmpty && hasMalData) return;
@@ -195,31 +166,35 @@ async function analyzeFiles() {
         document.getElementById('previewContainer').style.display = 'block';
         document.getElementById('changeCount').innerText = changes.length;
         document.getElementById('changeList').innerHTML = changes.map(c => {
-            const tag = c.isNew ? `<span style="color:#00ff88; font-size:10px;">[ADDED]</span>` : `<span style="color:#ffcc00; font-size:10px;">[UPDATE]</span>`;
+            const tag = c.isNew
+                ? `<span style="color:#00ff88; font-size:10px;">[ADDED]</span>`
+                : `<span style="color:#ffcc00; font-size:10px;">[UPDATE]</span>`;
             return `<div class="change-item" style="margin-bottom:12px; border-bottom:1px solid #333; padding-bottom:8px;">
                 ${tag} <span style="color:#ffffff; font-size:14px;">${c.title}</span><br>
                 <div style="color:#ddd; font-size:12px; margin-left:15px; margin-top:4px;">${c.diff}</div>
             </div>`;
-        }).join('') || "Lists are synced.";
+        }).join('') || 'Lists are synced.';
 
         sessionStorage.setItem('baka_xml_data', bakaText);
         sessionStorage.setItem('baka_changes', JSON.stringify(changes.map(c => c.id)));
-        logger("Analysis complete.", "success");
-    } catch (e) { logger("Error: " + e.message, "error"); }
+        logger('Analysis complete.', 'success');
+    } catch (e) {
+        logger('Error: ' + e.message, 'error');
+    }
 }
 
 // --- Action Handlers ---
 syncBtn.addEventListener('click', () => {
     const token = getStoredToken();
-    if (!token) { alert("Please Authorize first."); return; }
-    if (!sessionStorage.getItem('baka_xml_data')) { alert("Upload and Analyze files first."); return; }
+    if (!token) { alert('Please Authorize first.'); return; }
+    if (!sessionStorage.getItem('baka_xml_data')) { alert('Upload and Analyze files first.'); return; }
     performSync(token);
 });
 
 authBtn.addEventListener('click', () => {
     const verifier = generateRandomString(128);
     localStorage.setItem('mal_verifier', verifier);
-    const authUrl = new URL("https://myanimelist.net/v1/oauth2/authorize");
+    const authUrl = new URL('https://myanimelist.net/v1/oauth2/authorize');
     authUrl.searchParams.set('response_type', 'code');
     authUrl.searchParams.set('client_id', CLIENT_ID);
     authUrl.searchParams.set('code_challenge', verifier);
@@ -230,7 +205,7 @@ authBtn.addEventListener('click', () => {
 
 document.getElementById('resetBtn').addEventListener('click', (e) => {
     e.preventDefault();
-    if(confirm("Log out and reset token?")) { clearToken(); location.reload(); }
+    if (confirm('Log out and reset token?')) { clearToken(); location.reload(); }
 });
 
 window.onload = async () => {
@@ -240,48 +215,56 @@ window.onload = async () => {
     const verifier = localStorage.getItem('mal_verifier');
 
     if (code && verifier) {
-        logger("Exchanging code for token...", "info");
+        logger('Exchanging code for token...', 'info');
         try {
-            const response = await fetchWithFallback('https://myanimelist.net/v1/oauth2/token', {
+            const response = await proxyFetch('https://myanimelist.net/v1/oauth2/token', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams({
-                    client_id: CLIENT_ID, grant_type: 'authorization_code',
-                    code: code, code_verifier: verifier, redirect_uri: REDIRECT_URI
+                    client_id: CLIENT_ID,
+                    grant_type: 'authorization_code',
+                    code: code,
+                    code_verifier: verifier,
+                    redirect_uri: REDIRECT_URI
                 })
             });
+
             const data = await response.json();
             if (data.access_token) {
                 window.history.replaceState({}, document.title, REDIRECT_URI);
                 storeToken(data.access_token, data.expires_in);
                 updateSessionUI();
-                logger(`Token acquired! Valid for ${(data.expires_in/86400).toFixed(1)} days.`, "success");
+                logger(`Token acquired! Valid for ${(data.expires_in / 86400).toFixed(1)} days.`, 'success');
+            } else {
+                logger('Auth failed: ' + (data.message || data.error || 'Unknown error'), 'error');
             }
-        } catch (e) { logger("Auth failed: " + e.message, "error"); }
+        } catch (e) {
+            logger('Auth failed: ' + e.message, 'error');
+        }
     }
 };
 
+// --- Sync Logic ---
 async function performSync(token) {
     const bakaText = sessionStorage.getItem('baka_xml_data');
     const changedIds = JSON.parse(sessionStorage.getItem('baka_changes') || '[]');
-    const bakaXml = new DOMParser().parseFromString(bakaText, "text/xml");
-    const entries = Array.from(bakaXml.querySelectorAll('manga')).filter(b => 
+    const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
+    const entries = Array.from(bakaXml.querySelectorAll('manga')).filter(b =>
         changedIds.includes(b.querySelector('manga_mangadb_id')?.textContent?.trim())
     );
 
     if (entries.length === 0) return;
 
     syncBtn.disabled = true;
-    logger(`Starting sync for ${entries.length} items...`, "info");
-    console.group(`=== MAL Sync Raw Output — ${entries.length} entries ===`);
+    logger(`Starting sync for ${entries.length} items...`, 'info');
 
     for (const b of entries) {
         const id = b.querySelector('manga_mangadb_id').textContent.trim();
         const title = b.querySelector('manga_title').textContent;
-        
-        let payload = {};
+
+        const payload = {};
         SYNC_FIELDS.forEach(f => {
-            let val = b.querySelector(f)?.textContent?.trim() || "";
+            let val = b.querySelector(f)?.textContent?.trim() || '';
             const key = fieldKeyMap[f];
 
             if (key === 'status') {
@@ -289,25 +272,18 @@ async function performSync(token) {
                 if (val === 'planning') val = 'plan_to_read';
                 if (val === 'on-hold') val = 'on_hold';
             }
-            
+
             if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) {
                 val = parseInt(val, 10) || 0;
             }
 
-            if (key.includes('date') && (val === "0000-00-00" || !val)) return;
+            if (key.includes('date') && (val === '0000-00-00' || !val)) return;
 
-            if (val !== undefined && val !== "") {
-                payload[key] = val;
-            }
+            if (val !== undefined && val !== '') payload[key] = val;
         });
 
-        // Logs
-        console.log(`[${id}] ${title}`, payload);
-
         try {
-            const targetUrl = `https://api.myanimelist.net/v2/manga/${id}/my_list_status`;
-            
-            const response = await fetchWithFallback(targetUrl, {
+            const response = await proxyFetch(`https://api.myanimelist.net/v2/manga/${id}/my_list_status`, {
                 method: 'PUT',
                 headers: {
                     'Authorization': `Bearer ${token}`,
@@ -317,25 +293,21 @@ async function performSync(token) {
             });
 
             const resultData = await response.json();
-
             if (response.ok) {
-                logger(`Synced: ${title}`, "success");
+                logger(`Synced: ${title}`, 'success');
             } else {
-                // If it fails, we log the deep error info to console only
                 console.error(`FAILED [${response.status}] ${title}:`, resultData);
-                logger(`Failed: ${title} (Status: ${response.status})`, "error");
+                logger(`Failed: ${title} (${response.status}: ${resultData.message || resultData.error || 'Unknown'})`, 'error');
             }
         } catch (e) {
             console.error(`System Error for ${title}:`, e);
-            logger(`Error: ${e.message}`, "error");
+            logger(`Error: ${e.message}`, 'error');
         }
 
-        // 250ms throttle to prevent MAL rate-limiting
         await new Promise(r => setTimeout(r, 250));
     }
 
-    console.groupEnd();
-    logger(`Sync process finished.`, "info");
+    logger('Sync complete.', 'info');
     syncBtn.disabled = false;
 }
 
