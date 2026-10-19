@@ -402,9 +402,11 @@ async function performSync(token) {
     const changedIds = JSON.parse(sessionStorage.getItem('baka_changes') || '[]');
     const capsMap = JSON.parse(sessionStorage.getItem('baka_caps') || '{}');
     const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
-    const entries = Array.from(bakaXml.querySelectorAll('manga')).filter(b =>
-        changedIds.includes(b.querySelector('manga_mangadb_id')?.textContent?.trim())
-    );
+    // Titles with comments are sent last.
+    const hasComment = (b) => !!b.querySelector('my_comments')?.textContent?.trim();
+    const entries = Array.from(bakaXml.querySelectorAll('manga'))
+        .filter(b => changedIds.includes(b.querySelector('manga_mangadb_id')?.textContent?.trim()))
+        .sort((a, b) => hasComment(a) - hasComment(b));
 
     if (entries.length === 0) return;
 
