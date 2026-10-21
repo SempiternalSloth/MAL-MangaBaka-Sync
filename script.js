@@ -8,7 +8,7 @@ const AUTH_POPUP_NAME = 'mal_auth_popup';
 const MB_CLIENT_ID = 'mTNqRFoUkjYpVuEwzMycZeiSGDOTQtUM';
 const MB_DISCOVERY = 'https://mangabaka.org/.well-known/openid-configuration';
 const MB_API = 'https://api.mangabaka.org';
-const MB_SCOPE = 'library.read';
+const MB_SCOPE = 'openid library.read';
 
 // Fields that are compared and sent to MAL.
 const SYNC_FIELDS = [
@@ -142,6 +142,13 @@ async function mbFetch(url, options = {}) {
     }
 }
 
+// Builds an error with the message from the API response body, if there is one.
+async function httpError(res) {
+    let detail = '';
+    try { detail = (await res.json()).message || ''; } catch {}
+    return new Error(`HTTP ${res.status}${detail ? ': ' + detail : ''}`);
+}
+
 async function getMbEndpoints() {
     const res = await mbFetch(MB_DISCOVERY);
     const d = await res.json();
@@ -160,15 +167,16 @@ async function testToken(prefix = 'mal') {
     const token = getStoredToken(prefix);
     if (!token) return;
     const name = prefix === 'mal' ? 'MAL' : 'MangaBaka';
-    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v1/my/profile`;
+    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v2/my/library?limit=1`;
     const doFetch = prefix === 'mal' ? proxyFetch : mbFetch;
     try {
         const res = await doFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
         if (res.status === 401) {
-            console.warn(`[AUTH] ${name} token rejected (401). Token cleared.`);
+            const err = await httpError(res);
+            console.warn(`[AUTH] ${name} token rejected. Token cleared.`, err.message);
             clearToken(prefix);
             updateSessionUI();
-            logger(`Saved ${name} token is not valid. Click Authorize to log in again.`, 'error');
+            logger(`Saved ${name} token was rejected (${err.message}). Click Authorize to log in again.`, 'error');
         } else if (res.ok) {
             console.log(`[AUTH] ${name} token test passed.`);
         } else {
@@ -386,6 +394,7 @@ window.addEventListener('storage', (e) => {
     if ((e.key === 'mal_access_token' || e.key === 'mb_access_token') && e.newValue) {
         updateSessionUI();
         logger('Logged in.', 'success');
+        testToken(e.key === 'mb_access_token' ? 'mb' : 'mal');
     }
 });
 
@@ -431,7 +440,7 @@ async function loadBakaFromApi() {
             const res = await mbFetch(`${MB_API}/v2/my/library?limit=100&page=${page}`, {
                 headers: { 'Authorization': `Bearer ${token}` }
             });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) throw await httpError(res);
             const json = await res.json();
             items.push(...json.data);
             console.log(`[MB] page ${page}: ${json.data.length} entries`);
@@ -476,7 +485,7 @@ async function loadMalFromApi() {
         for (let offset = 0; ; offset += 1000) {
             const url = `https://api.myanimelist.net/v2/users/@me/mangalist?limit=1000&offset=${offset}&nsfw=1&fields=${encodeURIComponent(fields)}`;
             const res = await proxyFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!res.ok) throw await httpError(res);
             const json = await res.json();
             json.data.forEach(({ node, list_status: ls = {} }) => rows.push({
                 manga_mangadb_id: node.id,
@@ -532,6 +541,9 @@ async function exchangeCode(prefix, code, isPopup) {
         });
 
         const data = await response.json();
+        console.log(`[AUTH] ${p.name} token response:`, {
+            token_type: data.token_type, scope: data.scope, expires_in: data.expires_in, refresh_token: !!data.refresh_token
+        });
         if (data.access_token) {
             window.history.replaceState({}, document.title, REDIRECT_URI);
             storeToken(data.access_token, data.expires_in, prefix);
