@@ -5,7 +5,7 @@ const PROXY = 'https://mal-mb-cors.spinoyllau-cloudflare.workers.dev/?url=';
 const AUTH_POPUP_NAME = 'mal_auth_popup';
 
 // MangaBaka OAuth app. Set the client ID from your MangaBaka app. Use the same redirect URI as MAL.
-const MB_CLIENT_ID = 'YOUR_MANGABAKA_CLIENT_ID';
+const MB_CLIENT_ID = 'mTNqRFoUkjYpVuEwzMycZeiSGDOTQtUM';
 const MB_DISCOVERY = 'https://mangabaka.org/.well-known/openid-configuration';
 const MB_API = 'https://api.mangabaka.org';
 const MB_SCOPE = 'library.read';
