@@ -4,6 +4,12 @@ const REDIRECT_URI = 'https://sempiternalsloth.github.io/MAL-MangaBaka-Sync/';
 const PROXY = 'https://sscors.sempiternalsloth.workers.dev/?url=';
 const AUTH_POPUP_NAME = 'mal_auth_popup';
 
+// MangaBaka OAuth app. Set the client ID from your MangaBaka app. Use the same redirect URI as MAL.
+const MB_CLIENT_ID = 'mTNqRFoUkjYpVuEwzMycZeiSGDOTQtUM';
+const MB_DISCOVERY = 'https://mangabaka.org/.well-known/openid-configuration';
+const MB_API = 'https://api.mangabaka.org';
+const MB_SCOPE = 'library.read';
+
 // Fields that are compared and sent to MAL.
 const SYNC_FIELDS = [
     'my_read_chapters', 'my_read_volumes', 'my_status',
@@ -32,6 +38,7 @@ const fieldKeyMap = {
 const logBox = document.getElementById('logBox');
 const syncBtn = document.getElementById('syncBtn');
 const authBtn = document.getElementById('authBtn');
+const mbAuthBtn = document.getElementById('mbAuthBtn');
 
 // --- Helpers ---
 function proxyFetch(url, options = {}) {
@@ -105,111 +112,119 @@ const generateRandomString = (length) => {
 };
 
 // --- Token Management ---
-function getStoredToken() {
-    const token = localStorage.getItem('mal_access_token');
-    const expiry = parseInt(localStorage.getItem('mal_token_expiry') || '0');
+// prefix is 'mal' or 'mb'.
+function getStoredToken(prefix = 'mal') {
+    const token = localStorage.getItem(`${prefix}_access_token`);
+    const expiry = parseInt(localStorage.getItem(`${prefix}_token_expiry`) || '0');
     if (token && Date.now() < expiry) return token;
     return null;
 }
 
-function storeToken(token, expiresIn) {
-    localStorage.setItem('mal_access_token', token);
-    localStorage.setItem('mal_token_expiry', Date.now() + ((expiresIn - 60) * 1000));
+function storeToken(token, expiresIn, prefix = 'mal') {
+    localStorage.setItem(`${prefix}_access_token`, token);
+    localStorage.setItem(`${prefix}_token_expiry`, Date.now() + (((expiresIn || 3600) - 60) * 1000));
 }
 
-function clearToken() {
-    localStorage.removeItem('mal_access_token');
-    localStorage.removeItem('mal_token_expiry');
-    localStorage.removeItem('mal_verifier');
+function clearToken(prefix = 'mal') {
+    localStorage.removeItem(`${prefix}_access_token`);
+    localStorage.removeItem(`${prefix}_token_expiry`);
+    localStorage.removeItem(`${prefix}_verifier`);
 }
 
-// Checks the saved token with MAL. Clears it on a 401. Keeps it on other errors.
-async function testToken() {
-    const token = getStoredToken();
-    if (!token) return;
+// MangaBaka requests try a direct call first. They use the proxy only if the direct call fails.
+// Do not use this for the code exchange, because a code works only once.
+async function mbFetch(url, options = {}) {
     try {
-        const res = await proxyFetch('https://api.myanimelist.net/v2/users/@me', {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
+        return await fetch(url, options);
+    } catch (e) {
+        console.warn('[MB] Direct request failed, using proxy.', e);
+        return proxyFetch(url, options);
+    }
+}
+
+async function getMbEndpoints() {
+    const res = await mbFetch(MB_DISCOVERY);
+    const d = await res.json();
+    if (!d.authorization_endpoint || !d.token_endpoint) throw new Error('Discovery document has no endpoints');
+    return { auth: d.authorization_endpoint, token: d.token_endpoint };
+}
+
+async function pkceChallenge(verifier) {
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    return btoa(String.fromCharCode(...new Uint8Array(hash)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// Checks a saved token with its API. Clears it on a 401. Keeps it on other errors.
+async function testToken(prefix = 'mal') {
+    const token = getStoredToken(prefix);
+    if (!token) return;
+    const name = prefix === 'mal' ? 'MAL' : 'MangaBaka';
+    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v1/my/profile`;
+    const doFetch = prefix === 'mal' ? proxyFetch : mbFetch;
+    try {
+        const res = await doFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
         if (res.status === 401) {
-            console.warn('[AUTH] Token rejected by MAL (401). Token cleared.');
-            clearToken();
+            console.warn(`[AUTH] ${name} token rejected (401). Token cleared.`);
+            clearToken(prefix);
             updateSessionUI();
-            logger('Saved token is not valid. Click Authorize to log in again.', 'error');
+            logger(`Saved ${name} token is not valid. Click Authorize to log in again.`, 'error');
         } else if (res.ok) {
-            console.log('[AUTH] Token test passed.');
+            console.log(`[AUTH] ${name} token test passed.`);
         } else {
-            console.warn(`[AUTH] Token test returned ${res.status}. Token kept.`);
+            console.warn(`[AUTH] ${name} token test returned ${res.status}. Token kept.`);
         }
     } catch (e) {
-        console.warn('[AUTH] Token test failed (network error). Token kept.', e);
+        console.warn(`[AUTH] ${name} token test failed (network error). Token kept.`, e);
     }
 }
 
 // --- UI ---
-function setAuthButton(loggedIn) {
-    if (loggedIn) {
-        authBtn.style.background = '#1a4a1a';
-        authBtn.style.color = '';
-        authBtn.style.fontWeight = '';
-        authBtn.innerText = 'Logged In';
-    } else {
-        authBtn.style.background = '#ffd800';
-        authBtn.style.color = '#000';
-        authBtn.style.fontWeight = 'bold';
-        authBtn.innerText = 'Authorize';
-    }
+// Logged out: the button starts the login. Logged in: the button loads the list from the API.
+function renderSession(prefix, sessionId, timerId, btn, loadLabel) {
+    const sessionDiv = document.getElementById(sessionId);
+    const expiry = parseInt(localStorage.getItem(`${prefix}_token_expiry`) || '0');
+    const loggedIn = expiry && Date.now() < expiry;
+
+    sessionDiv.style.display = loggedIn ? 'flex' : 'none';
+    btn.classList.toggle('needs-auth', !loggedIn);
+    btn.innerText = loggedIn ? loadLabel : 'Authorize';
+    if (!loggedIn) return;
+
+    const diff = expiry - Date.now();
+    const days = Math.floor(diff / 86400000);
+    const hours = Math.floor((diff % 86400000) / 3600000);
+    const mins = Math.floor((diff % 3600000) / 60000);
+    document.getElementById(timerId).innerText = days > 0 ? `${days}d ${hours}h` : `${hours}h ${mins}m`;
 }
 
 function updateSessionUI() {
-    const sessionDiv = document.getElementById('sessionInfo');
-    const timerSpan = document.getElementById('expireTimer');
-    const expiry = parseInt(localStorage.getItem('mal_token_expiry') || '0');
-
-    if (expiry && Date.now() < expiry) {
-        sessionDiv.style.display = 'flex';
-        setAuthButton(true);
-
-        const update = () => {
-            const diff = expiry - Date.now();
-            if (diff <= 0) {
-                sessionDiv.style.display = 'none';
-                setAuthButton(false);
-                return;
-            }
-            const days = Math.floor(diff / 86400000);
-            const hours = Math.floor((diff % 86400000) / 3600000);
-            const mins = Math.floor((diff % 3600000) / 60000);
-            timerSpan.innerText = days > 0 ? `${days}d ${hours}h` : `${hours}h ${mins}m`;
-        };
-        update();
-    } else {
-        sessionDiv.style.display = 'none';
-        setAuthButton(false);
-    }
+    renderSession('mal', 'sessionInfo', 'expireTimer', authBtn, 'Load MAL list');
+    renderSession('mb', 'mbSessionInfo', 'mbExpireTimer', mbAuthBtn, 'Load Baka list');
 }
 
 // --- Analysis Logic ---
 // Compares the two exports and shows the differences. Makes no network calls.
-async function analyzeFiles() {
-    const bakaFile = document.getElementById('bakaFile').files[0];
-    const malFile = document.getElementById('malFile').files[0];
-    if (!bakaFile || !malFile) return;
+// The two lists, as XML text. They come from uploaded files or from the APIs.
+const sources = { baka: null, mal: null };
 
-    logger('Analyzing files...', 'info');
+async function readFileText(file) {
+    if (file.name.endsWith('.gz')) {
+        const arrayBuffer = await file.arrayBuffer();
+        return new TextDecoder().decode(fflate.decompressSync(new Uint8Array(arrayBuffer)));
+    }
+    return file.text();
+}
+
+async function analyzeFiles() {
+    if (!sources.baka || !sources.mal) return;
+
+    logger('Analyzing lists...', 'info');
     try {
-        const bakaText = await bakaFile.text();
+        const bakaText = sources.baka;
         const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
         const bakaEntries = Array.from(bakaXml.querySelectorAll('manga'));
-
-        let malText;
-        if (malFile.name.endsWith('.gz')) {
-            const arrayBuffer = await malFile.arrayBuffer();
-            const decompressed = fflate.decompressSync(new Uint8Array(arrayBuffer));
-            malText = new TextDecoder().decode(decompressed);
-        } else {
-            malText = await malFile.text();
-        }
+        const malText = sources.mal;
 
         // MAL entries by ID.
         const malXml = new DOMParser().parseFromString(malText, 'text/xml');
@@ -271,11 +286,11 @@ async function analyzeFiles() {
 
                 if (bVal !== mVal) {
                     if (isBakaEmpty && hasMalData) return;
-                    const fieldLabel = `<span style="color:#88ccff;">${fieldLabels[f]}</span>`;
+                    const fieldLabel = fieldLabels[f];
                     if (!hasMalData || isNew) {
                         if (!isBakaEmpty) diffDetails.push(`${fieldLabel}: ${bVal}`);
                     } else {
-                        diffDetails.push(`${fieldLabel}: ${mVal} <span style="color:#ffcc00;">→</span> ${bVal}`);
+                        diffDetails.push(`${fieldLabel}: ${mVal} → ${bVal}`);
                     }
                 }
             });
@@ -289,12 +304,10 @@ async function analyzeFiles() {
         document.getElementById('previewContainer').style.display = 'block';
         document.getElementById('changeCount').innerText = changes.length;
         document.getElementById('changeList').innerHTML = changes.map(c => {
-            const tag = c.isNew
-                ? `<span style="color:#00ff88; font-size:10px;">[ADDED]</span>`
-                : `<span style="color:#ffcc00; font-size:10px;">[UPDATE]</span>`;
-            return `<div class="change-item" style="margin-bottom:12px; border-bottom:1px solid #333; padding-bottom:8px;">
-                ${tag} <span style="color:#ffffff; font-size:14px;">${c.title}</span><br>
-                <div style="color:#ddd; font-size:12px; margin-left:15px; margin-top:4px;">${c.diff}</div>
+            const tag = c.isNew ? '[ADDED]' : '[UPDATE]';
+            return `<div class="change-item">
+                <div class="change-title">${tag} ${c.title}</div>
+                <div class="change-diff">${c.diff}</div>
             </div>`;
         }).join('') || 'Lists are synced.';
 
@@ -318,80 +331,232 @@ syncBtn.addEventListener('click', () => {
     performSync(token);
 });
 
-// Opens the MAL login in a popup, so the main page keeps the selected files.
-authBtn.addEventListener('click', () => {
-    const verifier = generateRandomString(128);
-    localStorage.setItem('mal_verifier', verifier);
-    const authUrl = new URL('https://myanimelist.net/v1/oauth2/authorize');
-    authUrl.searchParams.set('response_type', 'code');
-    authUrl.searchParams.set('client_id', CLIENT_ID);
-    authUrl.searchParams.set('code_challenge', verifier);
-    authUrl.searchParams.set('code_challenge_method', 'plain');
-    authUrl.searchParams.set('redirect_uri', REDIRECT_URI);
-
-    const popup = window.open(authUrl.toString(), AUTH_POPUP_NAME, 'width=520,height=720');
-    if (!popup) {
-        logger('Popup blocked. Redirecting. Select the files again after login.', 'error');
-        window.location.href = authUrl.toString();
+// Opens a login popup, so the main page keeps the selected files.
+async function startLogin(prefix, buildAuthUrl) {
+    const popup = window.open('', AUTH_POPUP_NAME, 'width=520,height=720');
+    try {
+        const verifier = generateRandomString(128);
+        localStorage.setItem(`${prefix}_verifier`, verifier);
+        localStorage.setItem('auth_pending', prefix);
+        const url = await buildAuthUrl(verifier);
+        if (popup) {
+            popup.location.href = url;
+        } else {
+            logger('Popup blocked. Redirecting. Select the files again after login.', 'error');
+            window.location.href = url;
+        }
+    } catch (e) {
+        if (popup) popup.close();
+        console.error('Login error:', e);
+        logger('Login failed: ' + e.message, 'error');
     }
+}
+
+authBtn.addEventListener('click', () => {
+    if (getStoredToken('mal')) { loadMalFromApi(); return; }
+    startLogin('mal', async (verifier) => {
+        const u = new URL('https://myanimelist.net/v1/oauth2/authorize');
+        u.searchParams.set('response_type', 'code');
+        u.searchParams.set('client_id', CLIENT_ID);
+        u.searchParams.set('code_challenge', verifier);
+        u.searchParams.set('code_challenge_method', 'plain');
+        u.searchParams.set('redirect_uri', REDIRECT_URI);
+        return u.toString();
+    });
+});
+
+mbAuthBtn.addEventListener('click', () => {
+    if (getStoredToken('mb')) { loadBakaFromApi(); return; }
+    if (MB_CLIENT_ID.startsWith('YOUR_')) { logger('Set MB_CLIENT_ID in script.js first.', 'error'); return; }
+    startLogin('mb', async (verifier) => {
+        const { auth } = await getMbEndpoints();
+        const u = new URL(auth);
+        u.searchParams.set('response_type', 'code');
+        u.searchParams.set('client_id', MB_CLIENT_ID);
+        u.searchParams.set('redirect_uri', REDIRECT_URI);
+        u.searchParams.set('scope', MB_SCOPE);
+        u.searchParams.set('code_challenge', await pkceChallenge(verifier));
+        u.searchParams.set('code_challenge_method', 'S256');
+        return u.toString();
+    });
 });
 
 // The popup saves the token. This event updates the main page.
 window.addEventListener('storage', (e) => {
-    if (e.key === 'mal_access_token' && e.newValue) {
+    if ((e.key === 'mal_access_token' || e.key === 'mb_access_token') && e.newValue) {
         updateSessionUI();
         logger('Logged in.', 'success');
     }
 });
 
-document.getElementById('resetBtn').addEventListener('click', (e) => {
-    e.preventDefault();
-    if (confirm('Log out and reset token?')) {
-        clearToken();
-        updateSessionUI();
-        logger('Token cleared.', 'info');
-    }
+[['resetBtn', 'mal', 'MAL'], ['mbResetBtn', 'mb', 'MangaBaka']].forEach(([id, prefix, name]) => {
+    document.getElementById(id).addEventListener('click', (e) => {
+        e.preventDefault();
+        if (confirm(`Log out of ${name} and reset token?`)) {
+            clearToken(prefix);
+            updateSessionUI();
+            logger(`${name} token cleared.`, 'info');
+        }
+    });
 });
 
-// In the login popup, exchanges the code for a token. Otherwise tests the saved token.
+// --- API lists ---
+// Both APIs are converted to the same XML shape as the exports, so the analysis and sync stay the same.
+const xmlEscape = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function buildXml(rows) {
+    const tags = ['manga_mangadb_id', 'manga_title', 'manga_chapters', 'manga_volumes', ...SYNC_FIELDS];
+    return '<myanimelist>' + rows.map(r =>
+        '<manga>' + tags.map(t => `<${t}>${xmlEscape(r[t])}</${t}>`).join('') + '</manga>'
+    ).join('') + '</myanimelist>';
+}
+
+const BAKA_STATUS = {
+    reading: 'Reading', rereading: 'Reading', completed: 'Completed', paused: 'On-Hold',
+    dropped: 'Dropped', plan_to_read: 'Plan to Read', considering: 'Plan to Read'
+};
+const MAL_STATUS = {
+    reading: 'Reading', completed: 'Completed', on_hold: 'On-Hold',
+    dropped: 'Dropped', plan_to_read: 'Plan to Read'
+};
+const dateOnly = (d) => d ? String(d).slice(0, 10) : '0000-00-00';
+
+async function loadBakaFromApi() {
+    const token = getStoredToken('mb');
+    if (!token) return;
+    logger('Loading MangaBaka library...', 'info');
+    try {
+        const items = [];
+        for (let page = 1; ; page++) {
+            const res = await mbFetch(`${MB_API}/v2/my/library?limit=100&page=${page}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = await res.json();
+            items.push(...json.data);
+            console.log(`[MB] page ${page}: ${json.data.length} entries`);
+            if (!json.pagination?.next || json.data.length === 0) break;
+        }
+
+        let skipped = 0;
+        const rows = [];
+        items.forEach(({ entry, series }) => {
+            const malId = series?.source?.my_anime_list?.id;
+            if (!malId) { skipped++; console.log(`[MB] No MAL ID, skipped: series ${entry.series_id}`); return; }
+            const titles = series.titles || [];
+            rows.push({
+                manga_mangadb_id: malId,
+                manga_title: (titles.find(t => t.is_primary) || titles[0])?.title || `ID:${malId}`,
+                my_read_chapters: Math.floor(entry.progress_chapter || 0),
+                my_read_volumes: Math.floor(entry.progress_volume || 0),
+                my_status: BAKA_STATUS[entry.state] || 'Plan to Read',
+                my_score: Math.round((entry.rating || 0) / 10),
+                my_start_date: dateOnly(entry.start_date),
+                my_finish_date: dateOnly(entry.finish_date),
+                my_comments: entry.note || ''
+            });
+        });
+
+        sources.baka = buildXml(rows);
+        logger(`Loaded ${rows.length} MangaBaka entries (${skipped} without a MAL ID skipped).`, 'success');
+        analyzeFiles();
+    } catch (e) {
+        console.error('MangaBaka load error:', e);
+        logger('MangaBaka load failed: ' + e.message, 'error');
+    }
+}
+
+async function loadMalFromApi() {
+    const token = getStoredToken('mal');
+    if (!token) return;
+    logger('Loading MAL list...', 'info');
+    try {
+        const fields = 'num_chapters,num_volumes,list_status{start_date,finish_date,comments}';
+        const rows = [];
+        for (let offset = 0; ; offset += 1000) {
+            const url = `https://api.myanimelist.net/v2/users/@me/mangalist?limit=1000&offset=${offset}&nsfw=1&fields=${encodeURIComponent(fields)}`;
+            const res = await proxyFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = await res.json();
+            json.data.forEach(({ node, list_status: ls = {} }) => rows.push({
+                manga_mangadb_id: node.id,
+                manga_title: node.title,
+                manga_chapters: node.num_chapters || 0,
+                manga_volumes: node.num_volumes || 0,
+                my_read_chapters: ls.num_chapters_read || 0,
+                my_read_volumes: ls.num_volumes_read || 0,
+                my_status: MAL_STATUS[ls.status] || 'Plan to Read',
+                my_score: ls.score || 0,
+                my_start_date: ls.start_date || '0000-00-00',
+                my_finish_date: ls.finish_date || '0000-00-00',
+                my_comments: ls.comments || ''
+            }));
+            console.log(`[MAL] offset ${offset}: ${json.data.length} entries`);
+            if (json.data.length < 1000) break;
+        }
+        sources.mal = buildXml(rows);
+        logger(`Loaded ${rows.length} MAL entries.`, 'success');
+        analyzeFiles();
+    } catch (e) {
+        console.error('MAL load error:', e);
+        logger('MAL load failed: ' + e.message, 'error');
+    }
+}
+
+// --- Login code exchange ---
+const PROVIDERS = {
+    mal: { name: 'MAL', clientId: CLIENT_ID, tokenUrl: async () => 'https://myanimelist.net/v1/oauth2/token' },
+    mb:  { name: 'MangaBaka', clientId: MB_CLIENT_ID, tokenUrl: async () => (await getMbEndpoints()).token }
+};
+
+async function exchangeCode(prefix, code, isPopup) {
+    const p = PROVIDERS[prefix];
+    const verifier = localStorage.getItem(`${prefix}_verifier`);
+    localStorage.removeItem('auth_pending');
+    logger(`Exchanging ${p.name} code for token...`, 'info');
+    try {
+        const response = await proxyFetch(await p.tokenUrl(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: p.clientId,
+                grant_type: 'authorization_code',
+                code: code,
+                code_verifier: verifier,
+                redirect_uri: REDIRECT_URI
+            })
+        });
+
+        const data = await response.json();
+        if (data.access_token) {
+            window.history.replaceState({}, document.title, REDIRECT_URI);
+            storeToken(data.access_token, data.expires_in, prefix);
+            localStorage.removeItem(`${prefix}_verifier`);
+            updateSessionUI();
+            logger(`${p.name} token acquired!`, 'success');
+            if (isPopup) setTimeout(() => window.close(), 500);
+        } else {
+            console.error(`[AUTH] ${p.name} token response:`, data);
+            logger(`${p.name} auth failed: ` + (data.message || data.error_description || data.error || 'Unknown error'), 'error');
+        }
+    } catch (e) {
+        console.error(`[AUTH] ${p.name} exchange error:`, e);
+        logger(`${p.name} auth failed: ` + e.message, 'error');
+    }
+}
+
+// In the login popup, exchanges the code for a token. Otherwise tests the saved tokens.
 window.onload = async () => {
     updateSessionUI();
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code');
-    const verifier = localStorage.getItem('mal_verifier');
-    const isPopup = window.name === AUTH_POPUP_NAME;
+    const code = new URLSearchParams(window.location.search).get('code');
+    const pending = localStorage.getItem('auth_pending');
+    const isPopup = window.name === AUTH_POPUP_NAME || !!window.opener;
 
-    if (code && verifier) {
-        logger('Exchanging code for token...', 'info');
-        try {
-            const response = await proxyFetch('https://myanimelist.net/v1/oauth2/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({
-                    client_id: CLIENT_ID,
-                    grant_type: 'authorization_code',
-                    code: code,
-                    code_verifier: verifier,
-                    redirect_uri: REDIRECT_URI
-                })
-            });
-
-            const data = await response.json();
-            if (data.access_token) {
-                window.history.replaceState({}, document.title, REDIRECT_URI);
-                storeToken(data.access_token, data.expires_in);
-                localStorage.removeItem('mal_verifier');
-                updateSessionUI();
-                logger(`Token acquired! Valid for ${(data.expires_in / 86400).toFixed(1)} days.`, 'success');
-                if (isPopup) setTimeout(() => window.close(), 500);
-            } else {
-                logger('Auth failed: ' + (data.message || data.error || 'Unknown error'), 'error');
-            }
-        } catch (e) {
-            logger('Auth failed: ' + e.message, 'error');
-        }
-    } else if (getStoredToken()) {
-        await testToken();
+    if (code && PROVIDERS[pending]) {
+        await exchangeCode(pending, code, isPopup);
+    } else {
+        await testToken('mal');
+        await testToken('mb');
     }
 };
 
@@ -512,5 +677,11 @@ async function performSync(token) {
     syncBtn.disabled = false;
 }
 
-document.getElementById('bakaFile').addEventListener('change', analyzeFiles);
-document.getElementById('malFile').addEventListener('change', analyzeFiles);
+[['bakaFile', 'baka'], ['malFile', 'mal']].forEach(([id, key]) => {
+    document.getElementById(id).addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        sources[key] = await readFileText(file);
+        analyzeFiles();
+    });
+});
