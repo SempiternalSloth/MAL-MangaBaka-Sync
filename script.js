@@ -1,6 +1,6 @@
 // --- CONFIGURATION ---
 const CLIENT_ID = 'b8dd7bad6b617b069d311f9efcd3b103';
-const REDIRECT_URI = 'https://sempiternalsloth.github.io/MAL-MangaBaka-Sync/';
+const REDIRECT_URI = 'https://sempiternalsloth.github.io/MangaBaka-MAL-Sync/';
 const PROXY = 'https://mal-mb-cors.spinoyllau-cloudflare.workers.dev/?url=';
 const AUTH_POPUP_NAME = 'mal_auth_popup';
 
