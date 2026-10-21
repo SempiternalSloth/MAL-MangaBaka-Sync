@@ -281,8 +281,14 @@ async function analyzeFiles() {
 
                 // Ignore differences in spacing and line breaks in comments.
                 if (f === 'my_comments') {
-                    const nb = normalizeText(bVal);
-                    const nm = normalizeText(mVal);
+                    // Decode HTML entities and strip <br> tags properly
+                    const decodeHtml = (str) => {
+                        const txt = document.createElement('textarea');
+                        txt.innerHTML = str || '';
+                        return txt.value.replace(/<br\s*\/?>/gi, ' ').normalize('NFC').replace(/\s+/g, ' ').trim();
+                    };
+                    const nb = decodeHtml(bVal);
+                    const nm = decodeHtml(mVal);
                     if (nb !== nm) console.log(`[COMMENT DIFF] ${label}: MAL=${JSON.stringify(mVal)} MangaBaka=${JSON.stringify(bVal)}`);
                     bVal = nb;
                     mVal = nm;
