@@ -481,7 +481,7 @@ async function loadBakaFromApi() {
                 my_score: Math.round((entry.rating || 0) / 10),
                 my_start_date: dateOnly(entry.start_date),
                 my_finish_date: dateOnly(entry.finish_date),
-                my_comments: entry.note || ''
+                my_comments: new DOMParser().parseFromString(entry.note || '', 'text/html').body.textContent.replace(/<br\s*\/?>/gi, ' ').trim()
             });
         });
 
