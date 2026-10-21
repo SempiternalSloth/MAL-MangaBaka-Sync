@@ -1,11 +1,11 @@
 // --- CONFIGURATION ---
 const CLIENT_ID = 'b8dd7bad6b617b069d311f9efcd3b103';
 const REDIRECT_URI = 'https://sempiternalsloth.github.io/MAL-MangaBaka-Sync/';
-const PROXY = 'https://sscors.sempiternalsloth.workers.dev/?url=';
+const PROXY = 'https://mal-mb-cors.spinoyllau-cloudflare.workers.dev/?url=';
 const AUTH_POPUP_NAME = 'mal_auth_popup';
 
 // MangaBaka OAuth app. Set the client ID from your MangaBaka app. Use the same redirect URI as MAL.
-const MB_CLIENT_ID = 'mTNqRFoUkjYpVuEwzMycZeiSGDOTQtUM';
+const MB_CLIENT_ID = 'YOUR_MANGABAKA_CLIENT_ID';
 const MB_DISCOVERY = 'https://mangabaka.org/.well-known/openid-configuration';
 const MB_API = 'https://api.mangabaka.org';
 const MB_SCOPE = 'library.read';
@@ -514,8 +514,12 @@ async function exchangeCode(prefix, code, isPopup) {
     const verifier = localStorage.getItem(`${prefix}_verifier`);
     localStorage.removeItem('auth_pending');
     logger(`Exchanging ${p.name} code for token...`, 'info');
+    let step = 'loading the endpoints';
     try {
-        const response = await proxyFetch(await p.tokenUrl(), {
+        const tokenUrl = await p.tokenUrl();
+        console.log(`[AUTH] ${p.name} token URL:`, tokenUrl);
+        step = 'sending the token request';
+        const response = await proxyFetch(tokenUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
             body: new URLSearchParams({
@@ -541,7 +545,7 @@ async function exchangeCode(prefix, code, isPopup) {
         }
     } catch (e) {
         console.error(`[AUTH] ${p.name} exchange error:`, e);
-        logger(`${p.name} auth failed: ` + e.message, 'error');
+        logger(`${p.name} auth failed while ${step}: ` + e.message, 'error');
     }
 }
 
