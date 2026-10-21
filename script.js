@@ -216,6 +216,10 @@ function updateSessionUI() {
 // The two lists, as XML text. They come from uploaded files or from the APIs.
 const sources = { baka: null, mal: null };
 
+const setSourceStatus = (key, text) => { document.getElementById(`${key}Status`).textContent = text; };
+const countEntries = (xml) => (xml.match(/<manga>/g) || []).length;
+const normalizeText = (v) => String(v ?? '').normalize('NFC').replace(/\s+/g, ' ').trim();
+
 async function readFileText(file) {
     if (file.name.endsWith('.gz')) {
         const arrayBuffer = await file.arrayBuffer();
@@ -273,7 +277,16 @@ async function analyzeFiles() {
             SYNC_FIELDS.forEach(f => {
                 let bVal = b.querySelector(f)?.textContent?.trim() || '';
                 bVal = applyMalCaps(f, bVal, bStatus, caps, label);
-                const mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
+                let mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
+
+                // Ignore differences in spacing and line breaks in comments.
+                if (f === 'my_comments') {
+                    const nb = normalizeText(bVal);
+                    const nm = normalizeText(mVal);
+                    if (nb !== nm) console.log(`[COMMENT DIFF] ${label}: MAL=${JSON.stringify(mVal)} MangaBaka=${JSON.stringify(bVal)}`);
+                    bVal = nb;
+                    mVal = nm;
+                }
 
                 // A Completed title with a known total is not a change if MAL has the higher count.
                 if (!isNew && caps && (f === 'my_read_chapters' || f === 'my_read_volumes')) {
@@ -296,9 +309,9 @@ async function analyzeFiles() {
                     if (isBakaEmpty && hasMalData) return;
                     const fieldLabel = fieldLabels[f];
                     if (!hasMalData || isNew) {
-                        if (!isBakaEmpty) diffDetails.push(`${fieldLabel}: ${bVal}`);
+                        if (!isBakaEmpty) diffDetails.push(`${fieldLabel}: ${xmlEscape(bVal)}`);
                     } else {
-                        diffDetails.push(`${fieldLabel}: ${mVal} → ${bVal}`);
+                        diffDetails.push(`${fieldLabel}: ${xmlEscape(mVal)} <span class="arrow">→</span> ${xmlEscape(bVal)}`);
                     }
                 }
             });
@@ -314,7 +327,7 @@ async function analyzeFiles() {
         document.getElementById('changeList').innerHTML = changes.map(c => {
             const tag = c.isNew ? '[ADDED]' : '[UPDATE]';
             return `<div class="change-item">
-                <div class="change-title">${tag} ${c.title}</div>
+                <div class="change-title">${tag} ${xmlEscape(c.title)}</div>
                 <div class="change-diff">${c.diff}</div>
             </div>`;
         }).join('') || 'Lists are synced.';
@@ -428,12 +441,18 @@ const MAL_STATUS = {
     reading: 'Reading', completed: 'Completed', on_hold: 'On-Hold',
     dropped: 'Dropped', plan_to_read: 'Plan to Read'
 };
+// Prefer the English title, then a romanized one, then the primary title.
+function pickTitle(titles) {
+    const byLang = (langs) => langs.map(l => titles.find(t => t.language === l)).find(Boolean);
+    return (byLang(['en', 'ja-Latn', 'ko-Latn', 'zh-Latn', 'yue-Latn']) || titles.find(t => t.is_primary) || titles[0])?.title;
+}
 const dateOnly = (d) => d ? String(d).slice(0, 10) : '0000-00-00';
 
 async function loadBakaFromApi() {
     const token = getStoredToken('mb');
     if (!token) return;
     logger('Loading MangaBaka library...', 'info');
+    setSourceStatus('baka', 'Loading from API...');
     try {
         const items = [];
         for (let page = 1; ; page++) {
@@ -455,7 +474,7 @@ async function loadBakaFromApi() {
             const titles = series.titles || [];
             rows.push({
                 manga_mangadb_id: malId,
-                manga_title: (titles.find(t => t.is_primary) || titles[0])?.title || `ID:${malId}`,
+                manga_title: pickTitle(titles) || `ID:${malId}`,
                 my_read_chapters: Math.floor(entry.progress_chapter || 0),
                 my_read_volumes: Math.floor(entry.progress_volume || 0),
                 my_status: BAKA_STATUS[entry.state] || 'Plan to Read',
@@ -467,11 +486,13 @@ async function loadBakaFromApi() {
         });
 
         sources.baka = buildXml(rows);
+        setSourceStatus('baka', `API: ${rows.length} entries`);
         logger(`Loaded ${rows.length} MangaBaka entries (${skipped} without a MAL ID skipped).`, 'success');
         analyzeFiles();
     } catch (e) {
         console.error('MangaBaka load error:', e);
         logger('MangaBaka load failed: ' + e.message, 'error');
+        setSourceStatus('baka', 'API load failed');
     }
 }
 
@@ -479,6 +500,7 @@ async function loadMalFromApi() {
     const token = getStoredToken('mal');
     if (!token) return;
     logger('Loading MAL list...', 'info');
+    setSourceStatus('mal', 'Loading from API...');
     try {
         const fields = 'num_chapters,num_volumes,list_status{start_date,finish_date,comments}';
         const rows = [];
@@ -504,11 +526,13 @@ async function loadMalFromApi() {
             if (json.data.length < 1000) break;
         }
         sources.mal = buildXml(rows);
+        setSourceStatus('mal', `API: ${rows.length} entries`);
         logger(`Loaded ${rows.length} MAL entries.`, 'success');
         analyzeFiles();
     } catch (e) {
         console.error('MAL load error:', e);
         logger('MAL load failed: ' + e.message, 'error');
+        setSourceStatus('mal', 'API load failed');
     }
 }
 
@@ -697,7 +721,10 @@ async function performSync(token) {
     document.getElementById(id).addEventListener('change', async (e) => {
         const file = e.target.files[0];
         if (!file) return;
+        setSourceStatus(key, 'Reading file...');
         sources[key] = await readFileText(file);
+        setSourceStatus(key, `File: ${file.name} (${countEntries(sources[key])} entries)`);
+        e.target.value = '';
         analyzeFiles();
     });
 });
