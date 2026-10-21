@@ -466,11 +466,18 @@ async function loadBakaFromApi() {
             if (!json.pagination?.next || json.data.length === 0) break;
         }
 
-        let skipped = 0;
+        // Use a counter instead of logging every skipped entry.
+        let skippedCount = 0; 
         const rows = [];
+        
         items.forEach(({ entry, series }) => {
             const malId = series?.source?.my_anime_list?.id;
-            if (!malId) { skipped++; console.log(`[MB] No MAL ID, skipped: series ${entry.series_id}`); return; }
+            
+            if (!malId) { 
+                skippedCount++; 
+                return; // Skip logging individual entries
+            }
+            
             const titles = series.titles || [];
             rows.push({
                 manga_mangadb_id: malId,
@@ -487,7 +494,8 @@ async function loadBakaFromApi() {
 
         sources.baka = buildXml(rows);
         setSourceStatus('baka', `API: ${rows.length} entries`);
-        logger(`Loaded ${rows.length} MangaBaka entries (${skipped} without MAL ID skipped).`, 'success');
+        // Summary log after the loop is complete.
+        logger(`Loaded ${rows.length} MangaBaka entries (${skippedCount} without a MAL ID skipped).`, 'success');
         analyseFiles();
     } catch (e) {
         console.error('MangaBaka load error:', e);
