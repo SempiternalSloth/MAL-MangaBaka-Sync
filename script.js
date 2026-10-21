@@ -4,13 +4,13 @@ const REDIRECT_URI = 'https://sempiternalsloth.github.io/MangaBaka-MAL-Sync/';
 const PROXY = 'https://mal-mb-cors.spinoyllau-cloudflare.workers.dev/?url=';
 const AUTH_POPUP_NAME = 'mal_auth_popup';
 
-// MangaBaka OAuth app. Set the client ID from your MangaBaka app. Use the same redirect URI as MAL.
+// MangaBaka OAuth app settings.
 const MB_CLIENT_ID = 'mTNqRFoUkjYpVuEwzMycZeiSGDOTQtUM';
 const MB_DISCOVERY = 'https://mangabaka.org/.well-known/openid-configuration';
 const MB_API = 'https://api.mangabaka.org';
 const MB_SCOPE = 'openid library.read';
 
-// Fields that are compared and sent to MAL.
+// Fields compared and sent to MAL.
 const SYNC_FIELDS = [
     'my_read_chapters', 'my_read_volumes', 'my_status',
     'my_score', 'my_start_date', 'my_finish_date',
@@ -24,7 +24,7 @@ const fieldLabels = {
     'my_comments': 'Comments'
 };
 
-// Export field names and the matching MAL API field names.
+// Export field names and matching MAL API names.
 const fieldKeyMap = {
     'my_read_chapters': 'num_chapters_read',
     'my_read_volumes':  'num_volumes_read',
@@ -41,6 +41,7 @@ const authBtn = document.getElementById('authBtn');
 const mbAuthBtn = document.getElementById('mbAuthBtn');
 
 // --- Helpers ---
+
 function proxyFetch(url, options = {}) {
     return fetch(PROXY + encodeURIComponent(url), options);
 }
@@ -54,7 +55,7 @@ function logger(msg, type = 'info') {
     logBox.scrollTop = logBox.scrollHeight;
 }
 
-// Predicts the MAL clamp. MAL sets a Completed title to its total. A total of 0 means unknown.
+// Clamps Baka value to MAL totals if the title is marked 'completed'.
 function applyMalCaps(field, bVal, bStatus, caps, label = '') {
     if (!caps) return bVal;
 
@@ -78,13 +79,13 @@ function applyMalCaps(field, bVal, bStatus, caps, label = '') {
     return bVal;
 }
 
-// A totals lookup is only useful for Completed titles.
+// Checks if totals lookup is needed (i.e., title is completed).
 function shouldLookupTotals(entry) {
     const status = (entry.querySelector('my_status')?.textContent || '').trim().toLowerCase();
     return { needed: status === 'completed', status };
 }
 
-// Gets the totals of a title from the MAL API. Used for titles that are not in the MAL export.
+// Fetches totals from MAL API for titles missing in the MAL export.
 async function fetchMalTotals(id, token) {
     try {
         const res = await proxyFetch(
@@ -131,8 +132,7 @@ function clearToken(prefix = 'mal') {
     localStorage.removeItem(`${prefix}_verifier`);
 }
 
-// MangaBaka requests try a direct call first. They use the proxy only if the direct call fails.
-// Do not use this for the code exchange, because a code works only once.
+// MangaBaka uses direct fetch then proxy if it fails.
 async function mbFetch(url, options = {}) {
     try {
         return await fetch(url, options);
@@ -142,7 +142,7 @@ async function mbFetch(url, options = {}) {
     }
 }
 
-// Builds an error with the message from the API response body, if there is one.
+// Builds an error with message from API response body.
 async function httpError(res) {
     let detail = '';
     try { detail = (await res.json()).message || ''; } catch {}
@@ -152,7 +152,7 @@ async function httpError(res) {
 async function getMbEndpoints() {
     const res = await mbFetch(MB_DISCOVERY);
     const d = await res.json();
-    if (!d.authorization_endpoint || !d.token_endpoint) throw new Error('Discovery document has no endpoints');
+    if (!d.authorization_endpoint || !d.token_endpoint) throw new Error('Discovery document missing endpoints');
     return { auth: d.authorization_endpoint, token: d.token_endpoint };
 }
 
@@ -162,7 +162,7 @@ async function pkceChallenge(verifier) {
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// Checks a saved token with its API. Clears it on a 401. Keeps it on other errors.
+// Checks a saved token validity. Clears it if a 401 is received.
 async function testToken(prefix = 'mal') {
     const token = getStoredToken(prefix);
     if (!token) return;
@@ -176,7 +176,7 @@ async function testToken(prefix = 'mal') {
             console.warn(`[AUTH] ${name} token rejected. Token cleared.`, err.message);
             clearToken(prefix);
             updateSessionUI();
-            logger(`Saved ${name} token was rejected (${err.message}). Click Authorize to log in again.`, 'error');
+            logger(`Saved ${name} token was rejected. Authorize again.`, 'error');
         } else if (res.ok) {
             console.log(`[AUTH] ${name} token test passed.`);
         } else {
@@ -188,7 +188,6 @@ async function testToken(prefix = 'mal') {
 }
 
 // --- UI ---
-// Logged out: the button starts the login. Logged in: the button loads the list from the API.
 function renderSession(prefix, sessionId, timerId, btn, loadLabel) {
     const sessionDiv = document.getElementById(sessionId);
     const expiry = parseInt(localStorage.getItem(`${prefix}_token_expiry`) || '0');
@@ -212,8 +211,6 @@ function updateSessionUI() {
 }
 
 // --- Analysis Logic ---
-// Compares the two exports and shows the differences. Makes no network calls.
-// The two lists, as XML text. They come from uploaded files or from the APIs.
 const sources = { baka: null, mal: null };
 
 const setSourceStatus = (key, text) => { document.getElementById(`${key}Status`).textContent = text; };
@@ -228,17 +225,17 @@ async function readFileText(file) {
     return file.text();
 }
 
-async function analyzeFiles() {
+async function analyseFiles() {
     if (!sources.baka || !sources.mal) return;
 
-    logger('Analyzing lists...', 'info');
+    logger('Analysing lists...', 'info');
     try {
         const bakaText = sources.baka;
         const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
         const bakaEntries = Array.from(bakaXml.querySelectorAll('manga'));
         const malText = sources.mal;
 
-        // MAL entries by ID.
+        // Map MAL entries by ID.
         const malXml = new DOMParser().parseFromString(malText, 'text/xml');
         const malMap = new Map();
         Array.from(malXml.querySelectorAll('manga')).forEach(m => {
@@ -260,7 +257,7 @@ async function analyzeFiles() {
             const isNew = !mMatch;
             const diffDetails = [];
 
-            // MAL totals and read counts. New titles have none.
+            // Totals and caps lookup.
             let caps = null;
             if (mMatch) {
                 caps = {
@@ -279,9 +276,8 @@ async function analyzeFiles() {
                 bVal = applyMalCaps(f, bVal, bStatus, caps, label);
                 let mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
 
-                // Ignore differences in spacing and line breaks in comments.
+                // Handle comment formatting difference.
                 if (f === 'my_comments') {
-                    // Decode HTML entities and strip <br> tags properly
                     const decodeHtml = (str) => {
                         const txt = document.createElement('textarea');
                         txt.innerHTML = str || '';
@@ -289,12 +285,12 @@ async function analyzeFiles() {
                     };
                     const nb = decodeHtml(bVal);
                     const nm = decodeHtml(mVal);
-                    if (nb !== nm) console.log(`[COMMENT DIFF] ${label}: MAL=${JSON.stringify(mVal)} MangaBaka=${JSON.stringify(bVal)}`);
+                    if (nb !== nm) console.log(`[COMMENT DIFF] ${label}: MAL=${JSON.stringify(mVal)} MB=${JSON.stringify(bVal)}`);
                     bVal = nb;
                     mVal = nm;
                 }
 
-                // A Completed title with a known total is not a change if MAL has the higher count.
+                // Cap check: Ignore change if MAL has a higher count for a completed title.
                 if (!isNew && caps && (f === 'my_read_chapters' || f === 'my_read_volumes')) {
                     const total = f === 'my_read_chapters' ? caps.chapters : caps.volumes;
                     const isCompleted = bStatus.toLowerCase() === 'completed';
@@ -302,7 +298,7 @@ async function analyzeFiles() {
                         const bNum = parseInt(bVal, 10) || 0;
                         const mNum = parseInt(mVal, 10) || 0;
                         if (mNum > bNum) {
-                            console.log(`[MAL AHEAD] ${label} ${f}: MAL=${mNum}, MangaBaka=${bNum}, total=${total}. Ignored.`);
+                            console.log(`[MAL AHEAD] ${label} ${f}: MAL=${mNum}, MB=${bNum}, total=${total}. Ignored.`);
                             return;
                         }
                     }
@@ -333,12 +329,12 @@ async function analyzeFiles() {
         document.getElementById('changeList').innerHTML = changes.map(c => {
             const tag = c.isNew ? '[ADDED]' : '[UPDATE]';
             return `<div class="change-item">
-                <div class="change-title">${tag} ${xmlEscape(c.title)}</div>
-                <div class="change-diff">${c.diff}</div>
+                <div class="change-title">${tag} ${xmlEscape(c.title)}</div
+                <div class="change-diff">${c.diff}</div
             </div>`;
         }).join('') || 'Lists are synced.';
 
-        // Data for the sync step.
+        // Store data for sync phase.
         sessionStorage.setItem('baka_xml_data', bakaText);
         sessionStorage.setItem('baka_changes', JSON.stringify(changes.map(c => c.id)));
         sessionStorage.setItem('baka_caps', JSON.stringify(capsMap));
@@ -354,11 +350,11 @@ async function analyzeFiles() {
 syncBtn.addEventListener('click', () => {
     const token = getStoredToken();
     if (!token) { alert('Please Authorize first.'); return; }
-    if (!sessionStorage.getItem('baka_xml_data')) { alert('Upload and Analyze files first.'); return; }
+    if (!sessionStorage.getItem('baka_xml_data')) { alert('Upload and Analyse files first.'); return; }
     performSync(token);
 });
 
-// Opens a login popup, so the main page keeps the selected files.
+// Opens a login popup for OAuth.
 async function startLogin(prefix, buildAuthUrl) {
     const popup = window.open('', AUTH_POPUP_NAME, 'width=520,height=720');
     try {
@@ -369,7 +365,7 @@ async function startLogin(prefix, buildAuthUrl) {
         if (popup) {
             popup.location.href = url;
         } else {
-            logger('Popup blocked. Redirecting. Select the files again after login.', 'error');
+            logger('Popup blocked. Redirecting. Select files after login.', 'error');
             window.location.href = url;
         }
     } catch (e) {
@@ -408,7 +404,7 @@ mbAuthBtn.addEventListener('click', () => {
     });
 });
 
-// The popup saves the token. This event updates the main page.
+// Update UI when tokens are received in the popup.
 window.addEventListener('storage', (e) => {
     if ((e.key === 'mal_access_token' || e.key === 'mb_access_token') && e.newValue) {
         updateSessionUI();
@@ -428,8 +424,7 @@ window.addEventListener('storage', (e) => {
     });
 });
 
-// --- API lists ---
-// Both APIs are converted to the same XML shape as the exports, so the analysis and sync stay the same.
+// --- API Lists ---
 const xmlEscape = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function buildXml(rows) {
@@ -447,7 +442,6 @@ const MAL_STATUS = {
     reading: 'Reading', completed: 'Completed', on_hold: 'On-Hold',
     dropped: 'Dropped', plan_to_read: 'Plan to Read'
 };
-// Prefer the English title, then a romanized one, then the primary title.
 function pickTitle(titles) {
     const byLang = (langs) => langs.map(l => titles.find(t => t.language === l)).find(Boolean);
     return (byLang(['en', 'ja-Latn', 'ko-Latn', 'zh-Latn', 'yue-Latn']) || titles.find(t => t.is_primary) || titles[0])?.title;
@@ -493,8 +487,8 @@ async function loadBakaFromApi() {
 
         sources.baka = buildXml(rows);
         setSourceStatus('baka', `API: ${rows.length} entries`);
-        logger(`Loaded ${rows.length} MangaBaka entries (${skipped} without a MAL ID skipped).`, 'success');
-        analyzeFiles();
+        logger(`Loaded ${rows.length} MangaBaka entries (${skipped} without MAL ID skipped).`, 'success');
+        analyseFiles();
     } catch (e) {
         console.error('MangaBaka load error:', e);
         logger('MangaBaka load failed: ' + e.message, 'error');
@@ -534,7 +528,7 @@ async function loadMalFromApi() {
         sources.mal = buildXml(rows);
         setSourceStatus('mal', `API: ${rows.length} entries`);
         logger(`Loaded ${rows.length} MAL entries.`, 'success');
-        analyzeFiles();
+        analyseFiles();
     } catch (e) {
         console.error('MAL load error:', e);
         logger('MAL load failed: ' + e.message, 'error');
@@ -542,7 +536,7 @@ async function loadMalFromApi() {
     }
 }
 
-// --- Login code exchange ---
+// --- Code Exchange ---
 const PROVIDERS = {
     mal: { name: 'MAL', clientId: CLIENT_ID, tokenUrl: async () => 'https://myanimelist.net/v1/oauth2/token' },
     mb:  { name: 'MangaBaka', clientId: MB_CLIENT_ID, tokenUrl: async () => (await getMbEndpoints()).token }
@@ -553,11 +547,11 @@ async function exchangeCode(prefix, code, isPopup) {
     const verifier = localStorage.getItem(`${prefix}_verifier`);
     localStorage.removeItem('auth_pending');
     logger(`Exchanging ${p.name} code for token...`, 'info');
-    let step = 'loading the endpoints';
+    let step = 'loading endpoints';
     try {
         const tokenUrl = await p.tokenUrl();
         console.log(`[AUTH] ${p.name} token URL:`, tokenUrl);
-        step = 'sending the token request';
+        step = 'sending token request';
         const response = await proxyFetch(tokenUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -587,11 +581,11 @@ async function exchangeCode(prefix, code, isPopup) {
         }
     } catch (e) {
         console.error(`[AUTH] ${p.name} exchange error:`, e);
-        logger(`${p.name} auth failed while ${step}: ` + e.message, 'error');
+        logger(`${p.name} auth failed during ${step}: ` + e.message, 'error');
     }
 }
 
-// In the login popup, exchanges the code for a token. Otherwise tests the saved tokens.
+// Login popup handler.
 window.onload = async () => {
     updateSessionUI();
     const code = new URLSearchParams(window.location.search).get('code');
@@ -607,14 +601,14 @@ window.onload = async () => {
 };
 
 // --- Sync Logic ---
-// Sends each changed title to MAL, one at a time.
 async function performSync(token) {
     const bakaText = sessionStorage.getItem('baka_xml_data');
     const changedIds = JSON.parse(sessionStorage.getItem('baka_changes') || '[]');
     const capsMap = JSON.parse(sessionStorage.getItem('baka_caps') || '{}');
     const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
-    // Titles with comments are sent last.
     const hasComment = (b) => !!b.querySelector('my_comments')?.textContent?.trim();
+    
+    // Sort entries: comments last.
     const entries = Array.from(bakaXml.querySelectorAll('manga'))
         .filter(b => changedIds.includes(b.querySelector('manga_mangadb_id')?.textContent?.trim()))
         .sort((a, b) => hasComment(a) - hasComment(b));
@@ -634,7 +628,6 @@ async function performSync(token) {
         const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
         const label = `[${id}] ${title}`;
 
-        // Totals come from the MAL export. New Completed titles use an API lookup.
         let caps = capsMap[id] || null;
         if (caps) {
             console.log(`[CAPS] ${label}: from export (chapters=${caps.chapters}, volumes=${caps.volumes})`);
@@ -656,7 +649,6 @@ async function performSync(token) {
             }
         }
 
-        // Build the data for MAL.
         const payload = {};
         SYNC_FIELDS.forEach(f => {
             let val = b.querySelector(f)?.textContent?.trim() || '';
@@ -673,13 +665,13 @@ async function performSync(token) {
                 val = parseInt(val, 10) || 0;
             }
 
-            // Do not lower a count that is higher on MAL (Completed titles with a known total).
+            // MAL Cap enforcement check.
             if (caps && (key === 'num_chapters_read' || key === 'num_volumes_read')) {
                 const total = key === 'num_chapters_read' ? caps.chapters : caps.volumes;
                 const malRead = key === 'num_chapters_read' ? caps.readChapters : caps.readVolumes;
                 const isCompleted = bStatus.toLowerCase() === 'completed';
                 if (isCompleted && total && typeof malRead === 'number' && malRead > val) {
-                    console.log(`[MAL AHEAD] ${label} ${key}: MAL=${malRead}, MangaBaka=${val}, total=${total}. Not sent.`);
+                    console.log(`[MAL AHEAD] ${label} ${key}: MAL=${malRead}, MB=${val}, total=${total}. Not sent.`);
                     return;
                 }
             }
@@ -723,6 +715,7 @@ async function performSync(token) {
     syncBtn.disabled = false;
 }
 
+// --- File Upload Handlers ---
 [['bakaFile', 'baka'], ['malFile', 'mal']].forEach(([id, key]) => {
     document.getElementById(id).addEventListener('change', async (e) => {
         const file = e.target.files[0];
@@ -731,6 +724,6 @@ async function performSync(token) {
         sources[key] = await readFileText(file);
         setSourceStatus(key, `File: ${file.name} (${countEntries(sources[key])} entries)`);
         e.target.value = '';
-        analyzeFiles();
+        analyseFiles();
     });
 });
