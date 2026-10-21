@@ -249,7 +249,7 @@ async function analyzeFiles() {
         const changes = [];
         const capsMap = {};
 
-        console.group('=== MAL Cap Analysis ===');
+        console.group('=== Changelog ===');
 
         bakaEntries.forEach(b => {
             const id = b.querySelector('manga_mangadb_id')?.textContent?.trim();
