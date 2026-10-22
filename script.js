@@ -81,10 +81,14 @@ async function fetchMalTotals(id, token) {
             `https://api.myanimelist.net/v2/manga/${id}?fields=num_chapters,num_volumes`,
             { headers: { 'Authorization': `Bearer ${token}` } }
         );
-        if (!res.ok) return null;
+        if (!res.ok) {
+            console.warn(`[LOOKUP] ${id} failed with status ${res.status}`);
+            return null;
+        }
         const d = await res.json();
         return { chapters: d.num_chapters || 0, volumes: d.num_volumes || 0 };
     } catch (e) {
+        console.warn(`[LOOKUP] ${id} error:`, e);
         return null;
     }
 }
@@ -120,6 +124,7 @@ async function mbFetch(url, options = {}) {
     try {
         return await fetch(url, options);
     } catch (e) {
+        console.warn('[MB] Direct request failed, using proxy.', e);
         return proxyFetch(url, options);
     }
 }
@@ -193,6 +198,8 @@ async function analyseFiles() {
         const capsMap = {};
         const unmatchedEntries = [];
 
+        console.group('=== MAL Cap Analysis ===');
+
         bakaEntries.forEach(b => {
             const id = b.querySelector('manga_mangadb_id')?.textContent?.trim();
             if (!id || id === '0') {
@@ -215,10 +222,12 @@ async function analyseFiles() {
                 capsMap[id] = caps;
             }
             const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
+            const label = `[${id}] ${title}`;
 
             SYNC_FIELDS.forEach(f => {
                 let bVal = b.querySelector(f)?.textContent?.trim() || '';
                 const capInfo = applyMalCaps(f, bVal, bStatus, caps);
+                if (capInfo.reason) console.log(`[CAP] ${label} ${f}: ${bVal || '(empty)'} -> ${capInfo.value} (${capInfo.reason})`);
                 bVal = capInfo.value;
                 let mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
                 if (f === 'my_comments') {
@@ -227,13 +236,19 @@ async function analyseFiles() {
                         txt.innerHTML = str || '';
                         return txt.value.replace(/<br\s*\/?>/gi, ' ').normalize('NFC').replace(/\s+/g, ' ').trim();
                     };
+                    const rawB = bVal;
+                    const rawM = mVal;
                     bVal = decodeHtml(bVal);
                     mVal = decodeHtml(mVal);
+                    if (bVal !== mVal) console.log(`[COMMENT DIFF] ${label}: MAL=${JSON.stringify(rawM)} MangaBaka=${JSON.stringify(rawB)}`);
                 }
                 if (!isNew && caps && (f === 'my_read_chapters' || f === 'my_read_volumes')) {
                     const total = f === 'my_read_chapters' ? caps.chapters : caps.volumes;
                     if (bStatus.toLowerCase() === 'completed' && total) {
-                        if (parseInt(mVal, 10) > parseInt(bVal, 10)) return;
+                        if (parseInt(mVal, 10) > parseInt(bVal, 10)) {
+                            console.log(`[MAL AHEAD] ${label} ${f}: MAL=${mVal}, MangaBaka=${bVal}, total=${total}. Ignored.`);
+                            return;
+                        }
                     }
                 }
                 const isBakaEmpty = (bVal === '0' || bVal === '' || bVal === '0000-00-00' || bVal === 'Plan to Read');
@@ -251,6 +266,9 @@ async function analyseFiles() {
             if (diffDetails.length > 0) changes.push({ id, title, diff: diffDetails.join(' | '), isNew: true });
         });
         
+        console.log(`Caps loaded from MAL export for ${Object.keys(capsMap).length} titles. ${changes.length} titles have changes.`);
+        console.groupEnd();
+
         if (unmatchedEntries.length > 0) {
             console.group(`Missing MAL IDs (${unmatchedEntries.length} titles)`);
             unmatchedEntries.forEach(t => console.log(`- ${t}`));
@@ -268,6 +286,7 @@ async function analyseFiles() {
         sessionStorage.setItem('baka_caps', JSON.stringify(capsMap));
         logger('Analysis complete.', 'success');
     } catch (e) {
+        console.groupEnd();
         console.error('Analysis error:', e);
         logger('Error: ' + e.message, 'error');
     }
@@ -322,64 +341,72 @@ async function performSync(token) {
         .sort((a, b) => hasComment(a) - hasComment(b));
 
     if (entries.length === 0) return;
+
     syncBtn.disabled = true;
     logger(`Starting sync for ${entries.length} items...`, 'info');
+    console.group(`=== MAL Sync Raw Output — ${entries.length} entries ===`);
+
+    let lookupCount = 0;
+    let skippedLookupCount = 0;
 
     for (const b of entries) {
         const id = b.querySelector('manga_mangadb_id').textContent.trim();
         const title = b.querySelector('manga_title').textContent;
         const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
         const label = `[${id}] ${title}`;
-        
-        console.group(label);
 
         let caps = capsMap[id] || null;
-        if (!caps && shouldLookupTotals(b).needed) {
-            caps = await fetchMalTotals(id, token);
-            await new Promise(r => setTimeout(r, 250));
+        if (caps) {
+            console.log(`[CAPS] ${label}: from export (chapters=${caps.chapters}, volumes=${caps.volumes})`);
+        } else {
+            const check = shouldLookupTotals(b);
+            if (check.needed) {
+                console.log(`[LOOKUP] ${label}: requesting totals (status="${check.status}")`);
+                caps = await fetchMalTotals(id, token);
+                lookupCount++;
+                if (caps) console.log(`[LOOKUP] ${label}: got chapters=${caps.chapters}, volumes=${caps.volumes}`);
+                else console.warn(`[LOOKUP] ${label}: no totals returned, syncing uncapped`);
+                await new Promise(r => setTimeout(r, 250));
+            } else {
+                skippedLookupCount++;
+                console.log(`[SKIP LOOKUP] ${label}: status="${check.status}" is not completed, no cap needed`);
+            }
         }
 
         const payload = {};
-        const capReasons = [];
-        const actualChanges = [];
-
         SYNC_FIELDS.forEach(f => {
-            const bRaw = b.querySelector(f)?.textContent?.trim() || '';
-            const capInfo = applyMalCaps(f, bRaw, bStatus, caps);
-            const bVal = capInfo.value;
-            if (capInfo.reason) capReasons.push(`${fieldLabels[f]}: ${capInfo.reason}`);
-            
+            const raw = b.querySelector(f)?.textContent?.trim() || '';
+            const capInfo = applyMalCaps(f, raw, bStatus, caps);
+            let val = capInfo.value;
+            if (capInfo.reason) console.log(`[CAP] ${label} ${f}: ${raw || '(empty)'} -> ${val} (${capInfo.reason})`);
             const key = fieldKeyMap[f];
-            let mVal = caps ? (caps[key] || '') : ''; // Simplified for check
-            // In actual performSync, we compare against MAL state
-            // (Logic below ensures we only push what differs)
-            
-            let finalVal = bVal;
-            if (key === 'status') {
-                finalVal = finalVal.toLowerCase().replace(/\s+/g, '_');
-                if (finalVal === 'planning') finalVal = 'plan_to_read';
-                if (finalVal === 'on-hold') finalVal = 'on_hold';
-            }
-            if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) finalVal = parseInt(finalVal, 10) || 0;
-            if (key.includes('date') && (finalVal === '0000-00-00' || !finalVal)) return;
 
-            if (finalVal !== undefined && finalVal !== '') {
-                payload[key] = finalVal;
-                actualChanges.push(`${fieldLabels[f]} -> ${finalVal}`);
+            if (key === 'status') {
+                val = val.toLowerCase().replace(/\s+/g, '_');
+                if (val === 'planning') val = 'plan_to_read';
+                if (val === 'on-hold') val = 'on_hold';
             }
+
+            if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) {
+                val = parseInt(val, 10) || 0;
+            }
+
+            // Do not lower a count that is higher on MAL (Completed titles with a known total).
+            if (caps && (key === 'num_chapters_read' || key === 'num_volumes_read')) {
+                const total = key === 'num_chapters_read' ? caps.chapters : caps.volumes;
+                const malRead = key === 'num_chapters_read' ? caps.readChapters : caps.readVolumes;
+                if (bStatus.toLowerCase() === 'completed' && total && typeof malRead === 'number' && malRead > val) {
+                    console.log(`[MAL AHEAD] ${label} ${key}: MAL=${malRead}, MangaBaka=${val}, total=${total}. Not sent.`);
+                    return;
+                }
+            }
+
+            if (key.includes('date') && (val === '0000-00-00' || !val)) return;
+
+            if (val !== undefined && val !== '') payload[key] = val;
         });
 
-        if (capReasons.length > 0) {
-            console.group('Cap Reasonings');
-            capReasons.forEach(r => console.log(r));
-            console.groupEnd();
-        }
-
-        if (actualChanges.length > 0) {
-            console.group('Actual Changes');
-            actualChanges.forEach(c => console.log(c));
-            console.groupEnd();
-        }
+        console.log(`${label} payload:`, payload);
 
         try {
             const response = await proxyFetch(`https://api.myanimelist.net/v2/manga/${id}/my_list_status`, {
@@ -387,15 +414,25 @@ async function performSync(token) {
                 headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: new URLSearchParams(payload)
             });
-            if (response.ok) logger(`Synced: ${title}`, 'success');
-            else logger(`Failed: ${title}`, 'error');
+
+            const resultData = await response.json();
+            if (response.ok) {
+                logger(`Synced: ${title}`, 'success');
+                console.log(`OK [${response.status}] ${title}:`, resultData);
+            } else {
+                console.error(`FAILED [${response.status}] ${title}:`, resultData);
+                logger(`Failed: ${title} (${response.status}: ${resultData.message || resultData.error || 'Unknown'})`, 'error');
+            }
         } catch (e) {
+            console.error(`System Error for ${title}:`, e);
             logger(`Error: ${e.message}`, 'error');
         }
-        
-        console.groupEnd();
+
         await new Promise(r => setTimeout(r, 250));
     }
+
+    console.log(`Lookup summary: ${lookupCount} API lookups made, ${skippedLookupCount} skipped.`);
+    console.groupEnd();
     logger('Sync complete.', 'info');
     syncBtn.disabled = false;
 }
