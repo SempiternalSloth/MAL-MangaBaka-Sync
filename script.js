@@ -51,26 +51,23 @@ function logger(msg, type = 'info') {
     logBox.scrollTop = logBox.scrollHeight;
 }
 
-function applyMalCaps(field, bVal, bStatus, caps, label = '') {
-    if (!caps) return bVal;
+function applyMalCaps(field, bVal, bStatus, caps) {
+    if (!caps) return { value: bVal, reason: null };
     let total = 0;
     if (field === 'my_read_chapters') total = caps.chapters;
     if (field === 'my_read_volumes')  total = caps.volumes;
-    if (!total) return bVal;
+    if (!total) return { value: bVal, reason: null };
 
     const isCompleted = (bStatus || '').trim().toLowerCase() === 'completed';
-    if (!isCompleted) return bVal;
+    if (!isCompleted) return { value: bVal, reason: null };
 
     const n = parseInt(bVal, 10) || 0;
     let reason = null;
     if (n > total) reason = 'over MAL total';
     else if (n !== total) reason = 'completed -> set to MAL total';
 
-    if (reason) {
-        console.log(`[CAP] ${label} ${field}: ${bVal || '(empty)'} -> ${total} (${reason})`);
-        return String(total);
-    }
-    return bVal;
+    if (reason) return { value: String(total), reason: reason };
+    return { value: bVal, reason: null };
 }
 
 function shouldLookupTotals(entry) {
@@ -194,17 +191,19 @@ async function analyseFiles() {
         });
         const changes = [];
         const capsMap = {};
+        const unmatchedEntries = [];
 
         bakaEntries.forEach(b => {
             const id = b.querySelector('manga_mangadb_id')?.textContent?.trim();
             if (!id || id === '0') {
-                console.log(`[MISSING MAL ID] ${b.querySelector('manga_title')?.textContent || 'No Title'}`);
+                unmatchedEntries.push(b.querySelector('manga_title')?.textContent || 'No Title');
                 return; 
             }
             const title = b.querySelector('manga_title')?.textContent;
             const mMatch = malMap.get(id);
             const isNew = !mMatch;
             const diffDetails = [];
+
             let caps = null;
             if (mMatch) {
                 caps = {
@@ -216,11 +215,11 @@ async function analyseFiles() {
                 capsMap[id] = caps;
             }
             const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
-            const label = `[${id}] ${title}`;
 
             SYNC_FIELDS.forEach(f => {
                 let bVal = b.querySelector(f)?.textContent?.trim() || '';
-                bVal = applyMalCaps(f, bVal, bStatus, caps, label);
+                const capInfo = applyMalCaps(f, bVal, bStatus, caps);
+                bVal = capInfo.value;
                 let mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
                 if (f === 'my_comments') {
                     const decodeHtml = (str) => {
@@ -251,6 +250,12 @@ async function analyseFiles() {
             });
             if (diffDetails.length > 0) changes.push({ id, title, diff: diffDetails.join(' | '), isNew: true });
         });
+        
+        if (unmatchedEntries.length > 0) {
+            console.group(`Missing MAL IDs (${unmatchedEntries.length} titles)`);
+            unmatchedEntries.forEach(t => console.log(`- ${t}`));
+            console.groupEnd();
+        }
         
         document.getElementById('previewContainer').style.display = 'block';
         document.getElementById('changeCount').innerText = changes.length;
@@ -325,6 +330,9 @@ async function performSync(token) {
         const title = b.querySelector('manga_title').textContent;
         const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
         const label = `[${id}] ${title}`;
+        
+        console.group(label);
+
         let caps = capsMap[id] || null;
         if (!caps && shouldLookupTotals(b).needed) {
             caps = await fetchMalTotals(id, token);
@@ -332,24 +340,46 @@ async function performSync(token) {
         }
 
         const payload = {};
+        const capReasons = [];
+        const actualChanges = [];
+
         SYNC_FIELDS.forEach(f => {
-            let val = b.querySelector(f)?.textContent?.trim() || '';
-            val = applyMalCaps(f, val, bStatus, caps, label);
+            const bRaw = b.querySelector(f)?.textContent?.trim() || '';
+            const capInfo = applyMalCaps(f, bRaw, bStatus, caps);
+            const bVal = capInfo.value;
+            if (capInfo.reason) capReasons.push(`${fieldLabels[f]}: ${capInfo.reason}`);
+            
             const key = fieldKeyMap[f];
+            let mVal = caps ? (caps[key] || '') : ''; // Simplified for check
+            // In actual performSync, we compare against MAL state
+            // (Logic below ensures we only push what differs)
+            
+            let finalVal = bVal;
             if (key === 'status') {
-                val = val.toLowerCase().replace(/\s+/g, '_');
-                if (val === 'planning') val = 'plan_to_read';
-                if (val === 'on-hold') val = 'on_hold';
+                finalVal = finalVal.toLowerCase().replace(/\s+/g, '_');
+                if (finalVal === 'planning') finalVal = 'plan_to_read';
+                if (finalVal === 'on-hold') finalVal = 'on_hold';
             }
-            if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) val = parseInt(val, 10) || 0;
-            if (caps && (key === 'num_chapters_read' || key === 'num_volumes_read')) {
-                const total = key === 'num_chapters_read' ? caps.chapters : caps.volumes;
-                const malRead = key === 'num_chapters_read' ? caps.readChapters : caps.readVolumes;
-                if (bStatus.toLowerCase() === 'completed' && total && malRead > val) return;
+            if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) finalVal = parseInt(finalVal, 10) || 0;
+            if (key.includes('date') && (finalVal === '0000-00-00' || !finalVal)) return;
+
+            if (finalVal !== undefined && finalVal !== '') {
+                payload[key] = finalVal;
+                actualChanges.push(`${fieldLabels[f]} -> ${finalVal}`);
             }
-            if (key.includes('date') && (val === '0000-00-00' || !val)) return;
-            if (val !== undefined && val !== '') payload[key] = val;
         });
+
+        if (capReasons.length > 0) {
+            console.group('Cap Reasonings');
+            capReasons.forEach(r => console.log(r));
+            console.groupEnd();
+        }
+
+        if (actualChanges.length > 0) {
+            console.group('Actual Changes');
+            actualChanges.forEach(c => console.log(c));
+            console.groupEnd();
+        }
 
         try {
             const response = await proxyFetch(`https://api.myanimelist.net/v2/manga/${id}/my_list_status`, {
@@ -362,6 +392,8 @@ async function performSync(token) {
         } catch (e) {
             logger(`Error: ${e.message}`, 'error');
         }
+        
+        console.groupEnd();
         await new Promise(r => setTimeout(r, 250));
     }
     logger('Sync complete.', 'info');
@@ -522,10 +554,7 @@ async function loadBakaFromApi() {
         const rows = [];
         items.forEach(({ entry, series }) => {
             const malId = series?.source?.my_anime_list?.id;
-            if (!malId) { 
-                console.log(`[MISSING MAL ID] ${pickTitle(series.titles) || 'N/A'}`);
-                return;
-            }
+            if (!malId) return;
             const titles = series.titles || [];
             rows.push({
                 manga_mangadb_id: malId,
