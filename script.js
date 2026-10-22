@@ -151,12 +151,10 @@ function renderSession(prefix, sessionId, timerId, btn, loadLabel) {
     const sessionDiv = document.getElementById(sessionId);
     const expiry = parseInt(localStorage.getItem(`${prefix}_token_expiry`) || '0');
     const loggedIn = expiry && Date.now() < expiry;
-
     sessionDiv.style.display = loggedIn ? 'flex' : 'none';
     btn.classList.toggle('needs-auth', !loggedIn);
     btn.innerText = loggedIn ? loadLabel : 'Authorize';
     if (!loggedIn) return;
-
     const diff = expiry - Date.now();
     const days = Math.floor(diff / 86400000);
     const hours = Math.floor((diff % 86400000) / 3600000);
@@ -167,109 +165,6 @@ function renderSession(prefix, sessionId, timerId, btn, loadLabel) {
 function updateSessionUI() {
     renderSession('mal', 'sessionInfo', 'expireTimer', authBtn, 'Load MAL list');
     renderSession('mb', 'mbSessionInfo', 'mbExpireTimer', mbAuthBtn, 'Load Baka list');
-}
-
-// --- Core Functionality ---
-async function testToken(prefix = 'mal') {
-    const token = getStoredToken(prefix);
-    if (!token) return;
-    const name = prefix === 'mal' ? 'MAL' : 'MangaBaka';
-    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v2/my/library?limit=1`;
-    const doFetch = prefix === 'mal' ? proxyFetch : mbFetch;
-    try {
-        const res = await doFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
-        if (res.status === 401) {
-            clearToken(prefix);
-            updateSessionUI();
-            logger(`Saved ${name} token was rejected. Authorize again.`, 'error');
-        }
-    } catch (e) {
-        console.warn(`[AUTH] ${name} token test failed.`, e);
-    }
-}
-
-async function loadMalFromApi() {
-    const token = getStoredToken('mal');
-    if (!token) return;
-    logger('Loading MAL list...', 'info');
-    setSourceStatus('mal', 'Loading from API...');
-    try {
-        const fields = 'num_chapters,num_volumes,list_status{start_date,finish_date,comments}';
-        const rows = [];
-        for (let offset = 0; ; offset += 1000) {
-            const url = `https://api.myanimelist.net/v2/users/@me/mangalist?limit=1000&offset=${offset}&nsfw=1&fields=${encodeURIComponent(fields)}`;
-            const res = await proxyFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
-            if (!res.ok) throw await httpError(res);
-            const json = await res.json();
-            json.data.forEach(({ node, list_status: ls = {} }) => rows.push({
-                manga_mangadb_id: node.id,
-                manga_title: node.title,
-                manga_chapters: node.num_chapters || 0,
-                manga_volumes: node.num_volumes || 0,
-                my_read_chapters: ls.num_chapters_read || 0,
-                my_read_volumes: ls.num_volumes_read || 0,
-                my_status: MAL_STATUS[ls.status] || 'Plan to Read',
-                my_score: ls.score || 0,
-                my_start_date: ls.start_date || '0000-00-00',
-                my_finish_date: ls.finish_date || '0000-00-00',
-                my_comments: ls.comments || ''
-            }));
-            if (json.data.length < 1000) break;
-        }
-        sources.mal = buildXml(rows);
-        setSourceStatus('mal', `API: ${rows.length} entries`);
-        logger(`Loaded ${rows.length} MAL entries.`, 'success');
-        analyseFiles();
-    } catch (e) {
-        logger('MAL load failed: ' + e.message, 'error');
-        setSourceStatus('mal', 'API load failed');
-    }
-}
-
-async function loadBakaFromApi() {
-    const token = getStoredToken('mb');
-    if (!token) return;
-    logger('Loading MangaBaka library...', 'info');
-    setSourceStatus('baka', 'Loading from API...');
-    try {
-        const items = [];
-        for (let page = 1; ; page++) {
-            const res = await mbFetch(`${MB_API}/v2/my/library?limit=100&page=${page}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (!res.ok) throw await httpError(res);
-            const json = await res.json();
-            items.push(...json.data);
-            if (!json.pagination?.next || json.data.length === 0) break;
-        }
-        const rows = [];
-        items.forEach(({ entry, series }) => {
-            const malId = series?.source?.my_anime_list?.id;
-            if (!malId) { 
-                console.log(`[MISSING MAL ID] ${pickTitle(series.titles) || 'N/A'}`);
-                return;
-            }
-            const titles = series.titles || [];
-            rows.push({
-                manga_mangadb_id: malId,
-                manga_title: pickTitle(titles) || `ID:${malId}`,
-                my_read_chapters: Math.floor(entry.progress_chapter || 0),
-                my_read_volumes: Math.floor(entry.progress_volume || 0),
-                my_status: BAKA_STATUS[entry.state] || 'Plan to Read',
-                my_score: Math.round((entry.rating || 0) / 10),
-                my_start_date: dateOnly(entry.start_date),
-                my_finish_date: dateOnly(entry.finish_date),
-                my_comments: entry.note || ''
-            });
-        });
-        sources.baka = buildXml(rows);
-        setSourceStatus('baka', `API: ${rows.length} entries`);
-        logger(`Loaded ${rows.length} MangaBaka entries.`, 'success');
-        analyseFiles();
-    } catch (e) {
-        logger('MangaBaka load failed: ' + e.message, 'error');
-        setSourceStatus('baka', 'API load failed');
-    }
 }
 
 // --- Analysis Logic ---
@@ -567,6 +462,110 @@ syncBtn.addEventListener('click', () => {
     if (!sessionStorage.getItem('baka_xml_data')) { alert('Upload and Analyse files first.'); return; }
     performSync(token);
 });
+
+async function loadMalFromApi() {
+    const token = getStoredToken('mal');
+    if (!token) return;
+    logger('Loading MAL list...', 'info');
+    setSourceStatus('mal', 'Loading from API...');
+    try {
+        const fields = 'num_chapters,num_volumes,list_status{start_date,finish_date,comments}';
+        const rows = [];
+        for (let offset = 0; ; offset += 1000) {
+            const url = `https://api.myanimelist.net/v2/users/@me/mangalist?limit=1000&offset=${offset}&nsfw=1&fields=${encodeURIComponent(fields)}`;
+            const res = await proxyFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+            if (!res.ok) throw await httpError(res);
+            const json = await res.json();
+            json.data.forEach(({ node, list_status: ls = {} }) => rows.push({
+                manga_mangadb_id: node.id,
+                manga_title: node.title,
+                manga_chapters: node.num_chapters || 0,
+                manga_volumes: node.num_volumes || 0,
+                my_read_chapters: ls.num_chapters_read || 0,
+                my_read_volumes: ls.num_volumes_read || 0,
+                my_status: MAL_STATUS[ls.status] || 'Plan to Read',
+                my_score: ls.score || 0,
+                my_start_date: ls.start_date || '0000-00-00',
+                my_finish_date: ls.finish_date || '0000-00-00',
+                my_comments: ls.comments || ''
+            }));
+            console.log(`[MAL] offset ${offset}: ${json.data.length} entries`);
+            if (json.data.length < 1000) break;
+        }
+        sources.mal = buildXml(rows);
+        setSourceStatus('mal', `API: ${rows.length} entries`);
+        logger(`Loaded ${rows.length} MAL entries.`, 'success');
+        analyseFiles();
+    } catch (e) {
+        logger('MAL load failed: ' + e.message, 'error');
+        setSourceStatus('mal', 'API load failed');
+    }
+}
+
+async function loadBakaFromApi() {
+    const token = getStoredToken('mb');
+    if (!token) return;
+    logger('Loading MangaBaka library...', 'info');
+    setSourceStatus('baka', 'Loading from API...');
+    try {
+        const items = [];
+        for (let page = 1; ; page++) {
+            const res = await mbFetch(`${MB_API}/v2/my/library?limit=100&page=${page}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw await httpError(res);
+            const json = await res.json();
+            items.push(...json.data);
+            console.log(`[MB] page ${page}: ${json.data.length} entries`);
+            if (!json.pagination?.next || json.data.length === 0) break;
+        }
+        const rows = [];
+        items.forEach(({ entry, series }) => {
+            const malId = series?.source?.my_anime_list?.id;
+            if (!malId) { 
+                console.log(`[MISSING MAL ID] ${pickTitle(series.titles) || 'N/A'}`);
+                return;
+            }
+            const titles = series.titles || [];
+            rows.push({
+                manga_mangadb_id: malId,
+                manga_title: pickTitle(titles) || `ID:${malId}`,
+                my_read_chapters: Math.floor(entry.progress_chapter || 0),
+                my_read_volumes: Math.floor(entry.progress_volume || 0),
+                my_status: BAKA_STATUS[entry.state] || 'Plan to Read',
+                my_score: Math.round((entry.rating || 0) / 10),
+                my_start_date: dateOnly(entry.start_date),
+                my_finish_date: dateOnly(entry.finish_date),
+                my_comments: entry.note || ''
+            });
+        });
+        sources.baka = buildXml(rows);
+        setSourceStatus('baka', `API: ${rows.length} entries`);
+        logger(`Loaded ${rows.length} MangaBaka entries.`, 'success');
+        analyseFiles();
+    } catch (e) {
+        logger('MangaBaka load failed: ' + e.message, 'error');
+        setSourceStatus('baka', 'API load failed');
+    }
+}
+
+async function testToken(prefix = 'mal') {
+    const token = getStoredToken(prefix);
+    if (!token) return;
+    const name = prefix === 'mal' ? 'MAL' : 'MangaBaka';
+    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v2/my/library?limit=1`;
+    const doFetch = prefix === 'mal' ? proxyFetch : mbFetch;
+    try {
+        const res = await doFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (res.status === 401) {
+            clearToken(prefix);
+            updateSessionUI();
+            logger(`Saved ${name} token was rejected. Authorize again.`, 'error');
+        }
+    } catch (e) {
+        console.warn(`[AUTH] ${name} token test failed.`, e);
+    }
+}
 
 window.onload = async () => {
     updateSessionUI();
