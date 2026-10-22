@@ -210,6 +210,7 @@ async function analyseFiles() {
             const mMatch = malMap.get(id);
             const isNew = !mMatch;
             const diffDetails = [];
+            const plainDiffs = [];
 
             let caps = null;
             if (mMatch) {
@@ -257,13 +258,17 @@ async function analyseFiles() {
                     if (isBakaEmpty && hasMalData) return;
                     const fieldLabel = fieldLabels[f];
                     if (!hasMalData || isNew) {
-                        if (!isBakaEmpty) diffDetails.push(`${fieldLabel}: ${xmlEscape(bVal)}`);
+                        if (!isBakaEmpty) {
+                            diffDetails.push(`${fieldLabel}: ${xmlEscape(bVal)}`);
+                            plainDiffs.push(`${fieldLabel}: ${bVal}`);
+                        }
                     } else {
                         diffDetails.push(`${fieldLabel}: ${xmlEscape(mVal)} <span class="arrow">→</span> ${xmlEscape(bVal)}`);
+                        plainDiffs.push(`${fieldLabel}: ${mVal} -> ${bVal}`);
                     }
                 }
             });
-            if (diffDetails.length > 0) changes.push({ id, title, diff: diffDetails.join(' | '), isNew: true });
+            if (diffDetails.length > 0) changes.push({ id, title, diff: diffDetails.join(' | '), isNew, plain: plainDiffs });
         });
         
         console.log(`Caps loaded from MAL export for ${Object.keys(capsMap).length} titles. ${changes.length} titles have changes.`);
@@ -284,6 +289,7 @@ async function analyseFiles() {
         sessionStorage.setItem('baka_xml_data', sources.baka);
         sessionStorage.setItem('baka_changes', JSON.stringify(changes.map(c => c.id)));
         sessionStorage.setItem('baka_caps', JSON.stringify(capsMap));
+        sessionStorage.setItem('baka_diffs', JSON.stringify(Object.fromEntries(changes.map(c => [c.id, c.plain]))));
         logger('Analysis complete.', 'success');
     } catch (e) {
         console.groupEnd();
@@ -334,6 +340,7 @@ async function performSync(token) {
     const bakaText = sessionStorage.getItem('baka_xml_data');
     const changedIds = JSON.parse(sessionStorage.getItem('baka_changes') || '[]');
     const capsMap = JSON.parse(sessionStorage.getItem('baka_caps') || '{}');
+    const diffsMap = JSON.parse(sessionStorage.getItem('baka_diffs') || '{}');
     const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
     const hasComment = (b) => !!b.querySelector('my_comments')?.textContent?.trim();
     const entries = Array.from(bakaXml.querySelectorAll('manga'))
@@ -355,6 +362,8 @@ async function performSync(token) {
         const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
         const label = `[${id}] ${title}`;
 
+        console.group(label);
+
         let caps = capsMap[id] || null;
         if (caps) {
             console.log(`[CAPS] ${label}: from export (chapters=${caps.chapters}, volumes=${caps.volumes})`);
@@ -374,11 +383,12 @@ async function performSync(token) {
         }
 
         const payload = {};
+        const capReasons = [];
         SYNC_FIELDS.forEach(f => {
             const raw = b.querySelector(f)?.textContent?.trim() || '';
             const capInfo = applyMalCaps(f, raw, bStatus, caps);
             let val = capInfo.value;
-            if (capInfo.reason) console.log(`[CAP] ${label} ${f}: ${raw || '(empty)'} -> ${val} (${capInfo.reason})`);
+            if (capInfo.reason) capReasons.push(`${fieldLabels[f]}: ${raw || '(empty)'} -> ${val} (${capInfo.reason})`);
             const key = fieldKeyMap[f];
 
             if (key === 'status') {
@@ -406,6 +416,19 @@ async function performSync(token) {
             if (val !== undefined && val !== '') payload[key] = val;
         });
 
+        if (capReasons.length > 0) {
+            console.group('Cap Reasonings');
+            capReasons.forEach(r => console.log(r));
+            console.groupEnd();
+        }
+
+        const actualChanges = diffsMap[id] || [];
+        if (actualChanges.length > 0) {
+            console.group('Actual Changes');
+            actualChanges.forEach(c => console.log(c));
+            console.groupEnd();
+        }
+
         console.log(`${label} payload:`, payload);
 
         try {
@@ -427,6 +450,8 @@ async function performSync(token) {
             console.error(`System Error for ${title}:`, e);
             logger(`Error: ${e.message}`, 'error');
         }
+
+        console.groupEnd();
 
         await new Promise(r => setTimeout(r, 250));
     }
