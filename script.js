@@ -9,7 +9,6 @@ const MB_DISCOVERY = 'https://mangabaka.org/.well-known/openid-configuration';
 const MB_API = 'https://api.mangabaka.org';
 const MB_SCOPE = 'openid library.read';
 
-// Fields compared and sent to MAL.
 const SYNC_FIELDS = [
     'my_read_chapters', 'my_read_volumes', 'my_status',
     'my_score', 'my_start_date', 'my_finish_date',
@@ -23,7 +22,6 @@ const fieldLabels = {
     'my_comments': 'Comments'
 };
 
-// Export field names and matching MAL API names.
 const fieldKeyMap = {
     'my_read_chapters': 'num_chapters_read',
     'my_read_volumes':  'num_volumes_read',
@@ -55,7 +53,6 @@ function logger(msg, type = 'info') {
 
 function applyMalCaps(field, bVal, bStatus, caps, label = '') {
     if (!caps) return bVal;
-
     let total = 0;
     if (field === 'my_read_chapters') total = caps.chapters;
     if (field === 'my_read_volumes')  total = caps.volumes;
@@ -87,14 +84,10 @@ async function fetchMalTotals(id, token) {
             `https://api.myanimelist.net/v2/manga/${id}?fields=num_chapters,num_volumes`,
             { headers: { 'Authorization': `Bearer ${token}` } }
         );
-        if (!res.ok) {
-            console.warn(`[LOOKUP] ${id} failed with status ${res.status}`);
-            return null;
-        }
+        if (!res.ok) return null;
         const d = await res.json();
         return { chapters: d.num_chapters || 0, volumes: d.num_volumes || 0 };
     } catch (e) {
-        console.warn(`[LOOKUP] ${id} error:`, e);
         return null;
     }
 }
@@ -130,7 +123,6 @@ async function mbFetch(url, options = {}) {
     try {
         return await fetch(url, options);
     } catch (e) {
-        console.warn('[MB] Direct request failed, using proxy.', e);
         return proxyFetch(url, options);
     }
 }
@@ -144,7 +136,7 @@ async function httpError(res) {
 async function getMbEndpoints() {
     const res = await mbFetch(MB_DISCOVERY);
     const d = await res.json();
-    if (!d.authorization_endpoint || !d.token_endpoint) throw new Error('Discovery document missing endpoints');
+    if (!d.authorization_endpoint || !d.token_endpoint) throw new Error('Discovery missing endpoints');
     return { auth: d.authorization_endpoint, token: d.token_endpoint };
 }
 
@@ -177,13 +169,118 @@ function updateSessionUI() {
     renderSession('mb', 'mbSessionInfo', 'mbExpireTimer', mbAuthBtn, 'Load Baka list');
 }
 
+// --- Core Functionality ---
+async function testToken(prefix = 'mal') {
+    const token = getStoredToken(prefix);
+    if (!token) return;
+    const name = prefix === 'mal' ? 'MAL' : 'MangaBaka';
+    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v2/my/library?limit=1`;
+    const doFetch = prefix === 'mal' ? proxyFetch : mbFetch;
+    try {
+        const res = await doFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (res.status === 401) {
+            clearToken(prefix);
+            updateSessionUI();
+            logger(`Saved ${name} token was rejected. Authorize again.`, 'error');
+        }
+    } catch (e) {
+        console.warn(`[AUTH] ${name} token test failed.`, e);
+    }
+}
+
+async function loadMalFromApi() {
+    const token = getStoredToken('mal');
+    if (!token) return;
+    logger('Loading MAL list...', 'info');
+    setSourceStatus('mal', 'Loading from API...');
+    try {
+        const fields = 'num_chapters,num_volumes,list_status{start_date,finish_date,comments}';
+        const rows = [];
+        for (let offset = 0; ; offset += 1000) {
+            const url = `https://api.myanimelist.net/v2/users/@me/mangalist?limit=1000&offset=${offset}&nsfw=1&fields=${encodeURIComponent(fields)}`;
+            const res = await proxyFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+            if (!res.ok) throw await httpError(res);
+            const json = await res.json();
+            json.data.forEach(({ node, list_status: ls = {} }) => rows.push({
+                manga_mangadb_id: node.id,
+                manga_title: node.title,
+                manga_chapters: node.num_chapters || 0,
+                manga_volumes: node.num_volumes || 0,
+                my_read_chapters: ls.num_chapters_read || 0,
+                my_read_volumes: ls.num_volumes_read || 0,
+                my_status: MAL_STATUS[ls.status] || 'Plan to Read',
+                my_score: ls.score || 0,
+                my_start_date: ls.start_date || '0000-00-00',
+                my_finish_date: ls.finish_date || '0000-00-00',
+                my_comments: ls.comments || ''
+            }));
+            if (json.data.length < 1000) break;
+        }
+        sources.mal = buildXml(rows);
+        setSourceStatus('mal', `API: ${rows.length} entries`);
+        logger(`Loaded ${rows.length} MAL entries.`, 'success');
+        analyseFiles();
+    } catch (e) {
+        logger('MAL load failed: ' + e.message, 'error');
+        setSourceStatus('mal', 'API load failed');
+    }
+}
+
+async function loadBakaFromApi() {
+    const token = getStoredToken('mb');
+    if (!token) return;
+    logger('Loading MangaBaka library...', 'info');
+    setSourceStatus('baka', 'Loading from API...');
+    try {
+        const items = [];
+        const unmatchedBakaEntries = []; 
+        for (let page = 1; ; page++) {
+            const res = await mbFetch(`${MB_API}/v2/my/library?limit=100&page=${page}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!res.ok) throw await httpError(res);
+            const json = await res.json();
+            items.push(...json.data);
+            if (!json.pagination?.next || json.data.length === 0) break;
+        }
+        const rows = [];
+        items.forEach(({ entry, series }) => {
+            const malId = series?.source?.my_anime_list?.id;
+            if (!malId) { 
+                unmatchedBakaEntries.push({ title: pickTitle(series.titles) || 'N/A', bStatus: series.state });
+                return;
+            }
+            const titles = series.titles || [];
+            rows.push({
+                manga_mangadb_id: malId,
+                manga_title: pickTitle(titles) || `ID:${malId}`,
+                my_read_chapters: Math.floor(entry.progress_chapter || 0),
+                my_read_volumes: Math.floor(entry.progress_volume || 0),
+                my_status: BAKA_STATUS[entry.state] || 'Plan to Read',
+                my_score: Math.round((entry.rating || 0) / 10),
+                my_start_date: dateOnly(entry.start_date),
+                my_finish_date: dateOnly(entry.finish_date),
+                my_comments: entry.note || ''
+            });
+        });
+        sources.baka = buildXml(rows);
+        setSourceStatus('baka', `API: ${rows.length} entries`);
+        if (unmatchedBakaEntries.length > 0) {
+            console.log(`Total unmatched entries found: ${unmatchedBakaEntries.length}`);
+            unmatchedBakaEntries.forEach(u => console.log(`- ${u.title} (${u.bStatus})`));
+        }
+        logger(`Loaded ${rows.length} MangaBaka entries.`, 'success');
+        analyseFiles();
+    } catch (e) {
+        logger('MangaBaka load failed: ' + e.message, 'error');
+        setSourceStatus('baka', 'API load failed');
+    }
+}
 
 // --- Analysis Logic ---
 const sources = { baka: null, mal: null };
-
 const setSourceStatus = (key, text) => { document.getElementById(`${key}Status`).textContent = text; };
 const countEntries = (xml) => (xml.match(/<manga>/g) || []).length;
-const normalizeText = (v) => String(v ?? '').normalize('NFC').replace(/\s+/g, ' ').trim();
 
 async function readFileText(file) {
     if (file.name.endsWith('.gz')) {
@@ -195,46 +292,30 @@ async function readFileText(file) {
 
 async function analyseFiles() {
     if (!sources.baka || !sources.mal) return;
-
     logger('Analysing lists...', 'info');
-    
-    const syncState = {
-        changes: [],
-        capsMap: {},
-        unmatchedBakaEntries: [] 
-    };
-    
     try {
         const bakaXml = new DOMParser().parseFromString(sources.baka, 'text/xml');
         const bakaEntries = Array.from(bakaXml.querySelectorAll('manga'));
         const malXml = new DOMParser().parseFromString(sources.mal, 'text/xml');
         const malMap = new Map();
-        
-        // Map MAL IDs.
         Array.from(malXml.querySelectorAll('manga')).forEach(m => {
             const id = m.querySelector('manga_mangadb_id')?.textContent?.trim();
             if (id) malMap.set(id, m);
         });
-
         const changes = [];
+        const capsMap = {};
+        const unmatchedBakaEntries = [];
 
-        // 1. Process matched titles
         bakaEntries.forEach(b => {
             const id = b.querySelector('manga_mangadb_id')?.textContent?.trim();
-            
-            // Handle unmatched entries (Aggregation)
             if (!id || id === '0') {
-                const title = b.querySelector('manga_title')?.textContent || 'No Title';
-                const bStatus = b.querySelector('my_status')?.textContent?.trim() || 'Unknown';
-                syncState.unmatchedBakaEntries.push({ title: title, bStatus: bStatus });
+                unmatchedBakaEntries.push({ title: b.querySelector('manga_title')?.textContent || 'No Title', bStatus: b.querySelector('my_status')?.textContent?.trim() || 'Unknown' });
                 return; 
             }
-
             const title = b.querySelector('manga_title')?.textContent;
             const mMatch = malMap.get(id);
             const isNew = !mMatch;
             const diffDetails = [];
-
             let caps = null;
             if (mMatch) {
                 caps = {
@@ -243,46 +324,32 @@ async function analyseFiles() {
                     readChapters: parseInt(mMatch.querySelector('my_read_chapters')?.textContent, 10) || 0,
                     readVolumes:  parseInt(mMatch.querySelector('my_read_volumes')?.textContent, 10) || 0
                 };
-                syncState.capsMap[id] = caps;
+                capsMap[id] = caps;
             }
             const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
             const label = `[${id}] ${title}`;
 
-            // SYNC_FIELDS processing loop
             SYNC_FIELDS.forEach(f => {
                 let bVal = b.querySelector(f)?.textContent?.trim() || '';
                 bVal = applyMalCaps(f, bVal, bStatus, caps, label);
                 let mVal = isNew ? '' : (mMatch.querySelector(f)?.textContent?.trim() || '');
-
                 if (f === 'my_comments') {
                     const decodeHtml = (str) => {
                         const txt = document.createElement('textarea');
                         txt.innerHTML = str || '';
                         return txt.value.replace(/<br\s*\/?>/gi, ' ').normalize('NFC').replace(/\s+/g, ' ').trim();
                     };
-                    const nb = decodeHtml(bVal);
-                    const nm = decodeHtml(mVal);
-                    if (nb !== nm) console.log(`[COMMENT DIFF] ${label}: MAL=${JSON.stringify(mVal)} MB=${JSON.stringify(bVal)}`);
-                    bVal = nb;
-                    mVal = nm;
+                    bVal = decodeHtml(bVal);
+                    mVal = decodeHtml(mVal);
                 }
-                
                 if (!isNew && caps && (f === 'my_read_chapters' || f === 'my_read_volumes')) {
                     const total = f === 'my_read_chapters' ? caps.chapters : caps.volumes;
-                    const isCompleted = bStatus.toLowerCase() === 'completed';
-                    if (isCompleted && total) {
-                        const bNum = parseInt(bVal, 10) || 0;
-                        const mNum = parseInt(mVal, 10) || 0;
-                        if (mNum > bNum) {
-                            console.log(`[MAL AHEAD] ${label} ${f}: MAL=${mNum}, MB=${bNum}, total=${total}. Ignored.`);
-                            return;
-                        }
+                    if (bStatus.toLowerCase() === 'completed' && total) {
+                        if (parseInt(mVal, 10) > parseInt(bVal, 10)) return;
                     }
                 }
-
                 const isBakaEmpty = (bVal === '0' || bVal === '' || bVal === '0000-00-00' || bVal === 'Plan to Read');
                 const hasMalData = (mVal !== '0' && mVal !== '' && mVal !== '0000-00-00' && mVal !== 'Plan to Read');
-
                 if (bVal !== mVal) {
                     if (isBakaEmpty && hasMalData) return;
                     const fieldLabel = fieldLabels[f];
@@ -293,54 +360,144 @@ async function analyseFiles() {
                     }
                 }
             });
-
-            if (diffDetails.length > 0) changes.push({ id, title, diff: diffDetails.join(' | '), isNew: true, unmatched: false });
+            if (diffDetails.length > 0) changes.push({ id, title, diff: diffDetails.join(' | '), isNew: true });
         });
 
-        // --- CONSOLIDATED LOGGING FOR MISSING IDs ---
-        if (syncState.unmatchedBakaEntries.length > 0) {
-            console.log(`Total unmatched entries found: ${syncState.unmatchedBakaEntries.length}`);
-            syncState.unmatchedBakaEntries.forEach(u => {
-                console.log(`- Title: ${u.title} (Status: ${u.bStatus})`);
-            });
-        } else {
-            console.log('No entries were found without a corresponding MAL ID.');
+        if (unmatchedBakaEntries.length > 0) {
+            console.log(`Total unmatched entries found: ${unmatchedBakaEntries.length}`);
+            unmatchedBakaEntries.forEach(u => console.log(`- ${u.title} (${u.bStatus})`));
         }
         
-        // Render Changes List (for matched titles)
         document.getElementById('previewContainer').style.display = 'block';
         document.getElementById('changeCount').innerText = changes.length;
-        
-        const changeListHTML = changes.map(c => {
-            const tag = c.isNew ? '[ADDED]' : '[UPDATE]';
-            return `<div class="change-item">
-                <div class="change-title">${tag} ${xmlEscape(c.title)}</div
-                <div class="change-diff">${c.diff}</div
-            </div>`;
-        }).join('') || 'Lists are synced.';
-        
-        document.getElementById('changeList').innerHTML = changeListHTML;
+        document.getElementById('changeList').innerHTML = changes.map(c => 
+            `<div class="change-item"><div class="change-title">${c.isNew ? '[ADDED]' : '[UPDATE]'} ${xmlEscape(c.title)}</div><div class="change-diff">${c.diff}</div></div>`
+        ).join('') || 'Lists are synced.';
 
-        // Store data for sync phase.
-        sessionStorage.setItem('baka_xml_data', bakaText);
+        sessionStorage.setItem('baka_xml_data', sources.baka);
         sessionStorage.setItem('baka_changes', JSON.stringify(changes.map(c => c.id)));
         sessionStorage.setItem('baka_caps', JSON.stringify(capsMap));
         logger('Analysis complete.', 'success');
     } catch (e) {
-        console.groupEnd();
         console.error('Analysis error:', e);
         logger('Error: ' + e.message, 'error');
     }
 }
-// --- Action Handlers ---
-syncBtn.addEventListener('click', () => {
-    const token = getStoredToken();
-    if (!token) { alert('Please Authorize first.'); return; }
-    if (!sessionStorage.getItem('baka_xml_data')) { alert('Upload and Analyse files first.'); return; }
-    performSync(token);
-});
 
-// Opens a login popup for OAuth.
+// --- OAuth Exchange ---
+const PROVIDERS = {
+    mal: { name: 'MAL', clientId: CLIENT_ID, tokenUrl: async () => 'https://myanimelist.net/v1/oauth2/token' },
+    mb:  { name: 'MangaBaka', clientId: MB_CLIENT_ID, tokenUrl: async () => (await getMbEndpoints()).token }
+};
+
+async function exchangeCode(prefix, code, isPopup) {
+    const p = PROVIDERS[prefix];
+    const verifier = localStorage.getItem(`${prefix}_verifier`);
+    localStorage.removeItem('auth_pending');
+    try {
+        const tokenUrl = await p.tokenUrl();
+        const response = await proxyFetch(tokenUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id: p.clientId,
+                grant_type: 'authorization_code',
+                code: code,
+                code_verifier: verifier,
+                redirect_uri: REDIRECT_URI
+            })
+        });
+        const data = await response.json();
+        if (data.access_token) {
+            window.history.replaceState({}, document.title, REDIRECT_URI);
+            storeToken(data.access_token, data.expires_in, prefix);
+            localStorage.removeItem(`${prefix}_verifier`);
+            updateSessionUI();
+            logger(`${p.name} token acquired!`, 'success');
+            if (isPopup) setTimeout(() => window.close(), 500);
+        }
+    } catch (e) {
+        logger(`${p.name} auth failed: ${e.message}`, 'error');
+    }
+}
+
+// --- Sync Logic ---
+async function performSync(token) {
+    const bakaText = sessionStorage.getItem('baka_xml_data');
+    const changedIds = JSON.parse(sessionStorage.getItem('baka_changes') || '[]');
+    const capsMap = JSON.parse(sessionStorage.getItem('baka_caps') || '{}');
+    const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
+    const hasComment = (b) => !!b.querySelector('my_comments')?.textContent?.trim();
+    const entries = Array.from(bakaXml.querySelectorAll('manga'))
+        .filter(b => changedIds.includes(b.querySelector('manga_mangadb_id')?.textContent?.trim()))
+        .sort((a, b) => hasComment(a) - hasComment(b));
+
+    if (entries.length === 0) return;
+    syncBtn.disabled = true;
+    logger(`Starting sync for ${entries.length} items...`, 'info');
+
+    for (const b of entries) {
+        const id = b.querySelector('manga_mangadb_id').textContent.trim();
+        const title = b.querySelector('manga_title').textContent;
+        const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
+        const label = `[${id}] ${title}`;
+        let caps = capsMap[id] || null;
+        if (!caps && shouldLookupTotals(b).needed) {
+            caps = await fetchMalTotals(id, token);
+            await new Promise(r => setTimeout(r, 250));
+        }
+
+        const payload = {};
+        SYNC_FIELDS.forEach(f => {
+            let val = b.querySelector(f)?.textContent?.trim() || '';
+            val = applyMalCaps(f, val, bStatus, caps, label);
+            const key = fieldKeyMap[f];
+            if (key === 'status') {
+                val = val.toLowerCase().replace(/\s+/g, '_');
+                if (val === 'planning') val = 'plan_to_read';
+                if (val === 'on-hold') val = 'on_hold';
+            }
+            if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) val = parseInt(val, 10) || 0;
+            if (caps && (key === 'num_chapters_read' || key === 'num_volumes_read')) {
+                const total = key === 'num_chapters_read' ? caps.chapters : caps.volumes;
+                const malRead = key === 'num_chapters_read' ? caps.readChapters : caps.readVolumes;
+                if (bStatus.toLowerCase() === 'completed' && total && malRead > val) return;
+            }
+            if (key.includes('date') && (val === '0000-00-00' || !val)) return;
+            if (val !== undefined && val !== '') payload[key] = val;
+        });
+
+        try {
+            const response = await proxyFetch(`https://api.myanimelist.net/v2/manga/${id}/my_list_status`, {
+                method: 'PUT',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams(payload)
+            });
+            if (response.ok) logger(`Synced: ${title}`, 'success');
+            else logger(`Failed: ${title}`, 'error');
+        } catch (e) {
+            logger(`Error: ${e.message}`, 'error');
+        }
+        await new Promise(r => setTimeout(r, 250));
+    }
+    logger('Sync complete.', 'info');
+    syncBtn.disabled = false;
+}
+
+// --- Boot & Event Listeners ---
+const xmlEscape = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function buildXml(rows) {
+    const tags = ['manga_mangadb_id', 'manga_title', 'manga_chapters', 'manga_volumes', ...SYNC_FIELDS];
+    return '<myanimelist>' + rows.map(r => '<manga>' + tags.map(t => `<${t}>${xmlEscape(r[t])}</${t}>`).join('') + '</manga>').join('') + '</myanimelist>';
+}
+const BAKA_STATUS = { reading: 'Reading', rereading: 'Reading', completed: 'Completed', paused: 'On-Hold', dropped: 'Dropped', plan_to_read: 'Plan to Read', considering: 'Plan to Read' };
+const MAL_STATUS = { reading: 'Reading', completed: 'Completed', on_hold: 'On-Hold', dropped: 'Dropped', plan_to_read: 'Plan to Read' };
+function pickTitle(titles) {
+    const byLang = (langs) => langs.map(l => titles.find(t => t.language === l)).find(Boolean);
+    return (byLang(['en', 'ja-Latn', 'ko-Latn', 'zh-Latn', 'yue-Latn']) || titles.find(t => t.is_primary) || titles[0])?.title;
+}
+const dateOnly = (d) => d ? String(d).slice(0, 10) : '0000-00-00';
+
 async function startLogin(prefix, buildAuthUrl) {
     const popup = window.open('', AUTH_POPUP_NAME, 'width=520,height=720');
     try {
@@ -348,15 +505,10 @@ async function startLogin(prefix, buildAuthUrl) {
         localStorage.setItem(`${prefix}_verifier`, verifier);
         localStorage.setItem('auth_pending', prefix);
         const url = await buildAuthUrl(verifier);
-        if (popup) {
-            popup.location.href = url;
-        } else {
-            logger('Popup blocked. Redirecting. Select files after login.', 'error');
-            window.location.href = url;
-        }
+        if (popup) popup.location.href = url;
+        else window.location.href = url;
     } catch (e) {
         if (popup) popup.close();
-        console.error('Login error:', e);
         logger('Login failed: ' + e.message, 'error');
     }
 }
@@ -376,7 +528,6 @@ authBtn.addEventListener('click', () => {
 
 mbAuthBtn.addEventListener('click', () => {
     if (getStoredToken('mb')) { loadBakaFromApi(); return; }
-    if (MB_CLIENT_ID.startsWith('YOUR_')) { logger('Set MB_CLIENT_ID in script.js first.', 'error'); return; }
     startLogin('mb', async (verifier) => {
         const { auth } = await getMbEndpoints();
         const u = new URL(auth);
@@ -390,7 +541,6 @@ mbAuthBtn.addEventListener('click', () => {
     });
 });
 
-// The popup saves the token. This event updates the main page.
 window.addEventListener('storage', (e) => {
     if ((e.key === 'mal_access_token' || e.key === 'mb_access_token') && e.newValue) {
         updateSessionUI();
@@ -402,7 +552,7 @@ window.addEventListener('storage', (e) => {
 [['resetBtn', 'mal', 'MAL'], ['mbResetBtn', 'mb', 'MangaBaka']].forEach(([id, prefix, name]) => {
     document.getElementById(id).addEventListener('click', (e) => {
         e.preventDefault();
-        if (confirm(`Log out of ${name} and reset token?`)) {
+        if (confirm(`Log out of ${name}?`)) {
             clearToken(prefix);
             updateSessionUI();
             logger(`${name} token cleared.`, 'info');
@@ -410,280 +560,6 @@ window.addEventListener('storage', (e) => {
     });
 });
 
-// --- API lists ---
-const xmlEscape = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-function buildXml(rows) {
-    const tags = ['manga_mangadb_id', 'manga_title', 'manga_chapters', 'manga_volumes', ...SYNC_FIELDS];
-    return '<myanimelist>' + rows.map(r =>
-        '<manga>' + tags.map(t => `<${t}>${xmlEscape(r[t])}</${t}>`).join('') + '</manga>'
-    ).join('') + '</myanimelist>';
-}
-
-const BAKA_STATUS = {
-    reading: 'Reading', rereading: 'Reading', completed: 'Completed', paused: 'On-Hold',
-    dropped: 'Dropped', plan_to_read: 'Plan to Read', considering: 'Plan to Read'
-};
-const MAL_STATUS = {
-    reading: 'Reading', completed: 'Completed', on_hold: 'On-Hold',
-    dropped: 'Dropped', plan_to_read: 'Plan to Read'
-};
-function pickTitle(titles) {
-    const byLang = (langs) => langs.map(l => titles.find(t => t.language === l)).find(Boolean);
-    return (byLang(['en', 'ja-Latn', 'ko-Latn', 'zh-Latn', 'yue-Latn']) || titles.find(t => t.is_primary) || titles[0])?.title;
-}
-const dateOnly = (d) => d ? String(d).slice(0, 10) : '0000-00-00';
-
-async function loadBakaFromApi() {
-    const token = getStoredToken('mb');
-    if (!token) return;
-    logger('Loading MangaBaka library...', 'info');
-    setSourceStatus('baka', 'Loading from API...');
-    try {
-        const items = [];
-        const unmatchedBakaEntries = []; 
-        
-        for (let page = 1; ; page++) {
-            const res = await mbFetch(`${MB_API}/v2/my/library?limit=100&page=${page}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (!res.ok) throw await httpError(res);
-            const json = await res.json();
-            items.push(...json.data);
-            console.log(`[MB] page ${page}: ${json.data.length} entries`);
-            if (!json.pagination?.next || json.data.length === 0) break;
-        }
-
-        let skippedCount = 0; 
-        const rows = [];
-        
-        items.forEach(({ entry, series }) => {
-            const malId = series?.source?.my_anime_list?.id;
-            
-            if (!malId) { 
-                skippedCount++; 
-                unmatchedBakaEntries.push({ title: pickTitle(series.titles) || 'N/A', bStatus: series.state });
-                return;
-            }
-            
-            const titles = series.titles || [];
-            rows.push({
-                manga_mangadb_id: malId,
-                manga_title: pickTitle(titles) || `ID:${malId}`,
-                my_read_chapters: Math.floor(entry.progress_chapter || 0),
-                my_read_volumes: Math.floor(entry.progress_volume || 0),
-                my_status: BAKA_STATUS[entry.state] || 'Plan to Read',
-                my_score: Math.round((entry.rating || 0) / 10),
-                my_start_date: dateOnly(entry.start_date),
-                my_finish_date: dateOnly(entry.finish_date),
-                my_comments: entry.note || ''
-            });
-        });
-
-        sources.baka = buildXml(rows);
-        setSourceStatus('baka', `API: ${rows.length} entries`);
-        
-        // --- CONSOLIDATED CONSOLE LOGGING FOR MISSING IDs ---
-        console.group('=== Titles Missing MAL ID ===');
-        if (unmatchedBakaEntries.length > 0) {
-            console.log(`Total unmatched entries found: ${unmatchedBakaEntries.length}`);
-            unmatchedBakaEntries.forEach(u => {
-                console.log(`- Title: ${u.title} (Status: ${u.bStatus})`);
-            });
-        } else {
-            console.log('No entries were found without a corresponding MAL ID.');
-        }
-        console.groupEnd();
-        
-        logger(`Loaded ${rows.length} MangaBaka entries.`, 'success');
-        analyseFiles();
-    } catch (e) {
-        console.error('MangaBaka load error:', e);
-        logger('MangaBaka load failed: ' + e.message, 'error');
-        setSourceStatus('baka', 'API load failed');
-    }
-}
-
-
-// --- Code Exchange ---
-const PROVIDERS = {
-    mal: { name: 'MAL', clientId: CLIENT_ID, tokenUrl: async () => 'https://myanimelist.net/v1/oauth2/token' },
-    mb:  { name: 'MangaBaka', clientId: MB_CLIENT_ID, tokenUrl: async () => (await getMbEndpoints()).token }
-};
-
-async function exchangeCode(prefix, code, isPopup) {
-    const p = PROVIDERS[prefix];
-    const verifier = localStorage.getItem(`${prefix}_verifier`);
-    localStorage.removeItem('auth_pending');
-    logger(`Exchanging ${p.name} code for token...`, 'info');
-    let step = 'loading endpoints';
-    try {
-        const tokenUrl = await p.tokenUrl();
-        console.log(`[AUTH] ${p.name} token URL:`, tokenUrl);
-        step = 'sending token request';
-        const response = await proxyFetch(tokenUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-                client_id: p.clientId,
-                grant_type: 'authorization_code',
-                code: code,
-                code_verifier: verifier,
-                redirect_uri: REDIRECT_URI
-            })
-        });
-
-        const data = await response.json();
-        console.log(`[AUTH] ${p.name} token response:`, {
-            token_type: data.token_type, scope: data.scope, expires_in: data.expires_in, refresh_token: !!data.refresh_token
-        });
-        if (data.access_token) {
-            window.history.replaceState({}, document.title, REDIRECT_URI);
-            storeToken(data.access_token, data.expires_in, prefix);
-            localStorage.removeItem(`${prefix}_verifier`);
-            updateSessionUI();
-            logger(`${p.name} token acquired!`, 'success');
-            if (isPopup) setTimeout(() => window.close(), 500);
-        } else {
-            console.error(`[AUTH] ${p.name} token response:`, data);
-            logger(`${p.name} auth failed: ` + (data.message || data.error_description || data.error || 'Unknown error'), 'error');
-        }
-    } catch (e) {
-        console.error(`[AUTH] ${p.name} exchange error:`, e);
-        logger(`${p.name} auth failed during ${step}: ` + e.message, 'error');
-    }
-}
-
-// Login popup handler.
-window.onload = async () => {
-    updateSessionUI();
-    const code = new URLSearchParams(window.location.search).get('code');
-    const pending = localStorage.getItem('auth_pending');
-    const isPopup = window.name === AUTH_POPUP_NAME || !!window.opener;
-
-    if (code && PROVIDERS[pending]) {
-        await exchangeCode(pending, code, isPopup);
-    } else {
-        await testToken('mal');
-        await testToken('mb');
-    }
-};
-
-// --- Sync Logic ---
-async function performSync(token) {
-    const bakaText = sessionStorage.getItem('baka_xml_data');
-    const changedIds = JSON.parse(sessionStorage.getItem('baka_changes') || '[]');
-    const capsMap = JSON.parse(sessionStorage.getItem('baka_caps') || '{}');
-    const bakaXml = new DOMParser().parseFromString(bakaText, 'text/xml');
-    const hasComment = (b) => !!b.querySelector('my_comments')?.textContent?.trim();
-    
-    const entries = Array.from(bakaXml.querySelectorAll('manga'))
-        .filter(b => changedIds.includes(b.querySelector('manga_mangadb_id')?.textContent?.trim()))
-        .sort((a, b) => hasComment(a) - hasComment(b));
-
-    if (entries.length === 0) return;
-
-    syncBtn.disabled = true;
-    logger(`Starting sync for ${entries.length} items...`, 'info');
-    console.group(`=== MAL Sync Raw Output — ${entries.length} entries ===`);
-
-    let lookupCount = 0;
-    let skippedLookupCount = 0;
-
-    for (const b of entries) {
-        const id = b.querySelector('manga_mangadb_id').textContent.trim();
-        const title = b.querySelector('manga_title').textContent;
-        const bStatus = b.querySelector('my_status')?.textContent?.trim() || '';
-        const label = `[${id}] ${title}`;
-
-        let caps = capsMap[id] || null;
-        if (caps) {
-            console.log(`[CAPS] ${label}: from export (chapters=${caps.chapters}, volumes=${caps.volumes})`);
-        } else {
-            const check = shouldLookupTotals(b);
-            if (check.needed) {
-                console.log(`[LOOKUP] ${label}: requesting totals (status="${check.status}")`);
-                caps = await fetchMalTotals(id, token);
-                lookupCount++;
-                if (caps) {
-                    console.log(`[LOOKUP] ${label}: got chapters=${caps.chapters}, volumes=${caps.volumes}`);
-                } else {
-                    console.warn(`[LOOKUP] ${label}: no totals returned, syncing uncapped`);
-                }
-                await new Promise(r => setTimeout(r, 250));
-            } else {
-                skippedLookupCount++;
-                console.log(`[SKIP LOOKUP] ${label}: status="${check.status}" is not completed, no cap needed`);
-            }
-        }
-
-        // Build the data for MAL.
-        const payload = {};
-        SYNC_FIELDS.forEach(f => {
-            let val = b.querySelector(f)?.textContent?.trim() || '';
-            val = applyMalCaps(f, val, bStatus, caps, label);
-            const key = fieldKeyMap[f];
-
-            if (key === 'status') {
-                val = val.toLowerCase().replace(/\s+/g, '_');
-                if (val === 'planning') val = 'plan_to_read';
-                if (val === 'on-hold') val = 'on_hold';
-            }
-
-            if (['score', 'num_volumes_read', 'num_chapters_read'].includes(key)) {
-                val = parseInt(val, 10) || 0;
-            }
-
-            // MAL Cap enforcement check.
-            if (caps && (key === 'num_chapters_read' || key === 'num_volumes_read')) {
-                const total = key === 'num_chapters_read' ? caps.chapters : caps.volumes;
-                const malRead = key === 'num_chapters_read' ? caps.readChapters : caps.readVolumes;
-                const isCompleted = bStatus.toLowerCase() === 'completed';
-                if (isCompleted && total && typeof malRead === 'number' && malRead > val) {
-                    console.log(`[MAL AHEAD] ${label} ${key}: MAL=${malRead}, MB=${val}, total=${total}. Not sent.`);
-                    return;
-                }
-            }
-
-            if (key.includes('date') && (val === '0000-00-00' || !val)) return;
-
-            if (val !== undefined && val !== '') payload[key] = val;
-        });
-
-        console.log(`${label} payload:`, payload);
-
-        try {
-            const response = await proxyFetch(`https://api.myanimelist.net/v2/manga/${id}/my_list_status`, {
-                method: 'PUT',
-                headers: {
-                    'Authorization': `Bearer ${token}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                body: new URLSearchParams(payload)
-            });
-
-            const resultData = await response.json();
-            if (response.ok) {
-                logger(`Synced: ${title}`, 'success');
-                console.log(`OK [${response.status}] ${title}:`, resultData);
-            } else {
-                console.error(`FAILED [${response.status}] ${title}:`, resultData);
-                logger(`Failed: ${title} (${response.status}: ${resultData.message || resultData.error || 'Unknown'})`, 'error');
-            }
-        } catch (e) {
-            console.error(`System Error for ${title}:`, e);
-            logger(`Error: ${e.message}`, 'error');
-        }
-
-        await new Promise(r => setTimeout(r, 250));
-    }
-
-    console.log(`Lookup summary: ${lookupCount} API lookups made, ${skippedLookupCount} skipped.`);
-    console.groupEnd();
-    logger('Sync complete.', 'info');
-}
-
-// --- File Upload Handlers ---
 [['bakaFile', 'baka'], ['malFile', 'mal']].forEach(([id, key]) => {
     document.getElementById(id).addEventListener('change', async (e) => {
         const file = e.target.files[0];
@@ -695,3 +571,19 @@ async function performSync(token) {
         analyseFiles();
     });
 });
+
+syncBtn.addEventListener('click', () => {
+    const token = getStoredToken();
+    if (!token) { alert('Please Authorize first.'); return; }
+    if (!sessionStorage.getItem('baka_xml_data')) { alert('Upload and Analyse files first.'); return; }
+    performSync(token);
+});
+
+window.onload = async () => {
+    updateSessionUI();
+    const code = new URLSearchParams(window.location.search).get('code');
+    const pending = localStorage.getItem('auth_pending');
+    const isPopup = window.name === AUTH_POPUP_NAME || !!window.opener;
+    if (code && PROVIDERS[pending]) await exchangeCode(pending, code, isPopup);
+    else { await testToken('mal'); await testToken('mb'); }
+};
