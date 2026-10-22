@@ -571,6 +571,71 @@ window.onload = async () => {
     }
 };
 
+// Checks a saved token validity. Clears it if a 401 is received.
+async function testToken(prefix = 'mal') {
+    const token = getStoredToken(prefix);
+    if (!token) return;
+    const name = prefix === 'mal' ? 'MAL' : 'MangaBaka';
+    const url = prefix === 'mal' ? 'https://api.myanimelist.net/v2/users/@me' : `${MB_API}/v2/my/library?limit=1`;
+    const doFetch = prefix === 'mal' ? proxyFetch : mbFetch;
+    try {
+        const res = await doFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (res.status === 401) {
+            const err = await httpError(res);
+            console.warn(`[AUTH] ${name} token rejected. Token cleared.`, err.message);
+            clearToken(prefix);
+            updateSessionUI();
+            logger(`Saved ${name} token was rejected. Authorize again.`, 'error');
+        } else if (res.ok) {
+            console.log(`[AUTH] ${name} token test passed.`);
+        } else {
+            console.warn(`[AUTH] ${name} token test returned ${res.status}. Token kept.`);
+        }
+    } catch (e) {
+        console.warn(`[AUTH] ${name} token test failed (network error). Token kept.`, e);
+    }
+}
+
+async function loadMalFromApi() {
+    const token = getStoredToken('mal');
+    if (!token) return;
+    logger('Loading MAL list...', 'info');
+    setSourceStatus('mal', 'Loading from API...');
+    try {
+        const fields = 'num_chapters,num_volumes,list_status{start_date,finish_date,comments}';
+        const rows = [];
+        for (let offset = 0; ; offset += 1000) {
+            const url = `https://api.myanimelist.net/v2/users/@me/mangalist?limit=1000&offset=${offset}&nsfw=1&fields=${encodeURIComponent(fields)}`;
+            const res = await proxyFetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+            if (!res.ok) throw await httpError(res);
+            const json = await res.json();
+            json.data.forEach(({ node, list_status: ls = {} }) => rows.push({
+                manga_mangadb_id: node.id,
+                manga_title: node.title,
+                manga_chapters: node.num_chapters || 0,
+                manga_volumes: node.num_volumes || 0,
+                my_read_chapters: ls.num_chapters_read || 0,
+                my_read_volumes: ls.num_volumes_read || 0,
+                my_status: MAL_STATUS[ls.status] || 'Plan to Read',
+                my_score: ls.score || 0,
+                my_start_date: ls.start_date || '0000-00-00',
+                my_finish_date: ls.finish_date || '0000-00-00',
+                my_comments: ls.comments || ''
+            }));
+            console.log(`[MAL] offset ${offset}: ${json.data.length} entries`);
+            if (json.data.length < 1000) break;
+        }
+        sources.mal = buildXml(rows);
+        setSourceStatus('mal', `API: ${rows.length} entries`);
+        logger(`Loaded ${rows.length} MAL entries.`, 'success');
+        analyseFiles();
+    } catch (e) {
+        console.error('MAL load error:', e);
+        logger('MAL load failed: ' + e.message, 'error');
+        setSourceStatus('mal', 'API load failed');
+    }
+}
+
 // --- Sync Logic ---
 async function performSync(token) {
     const bakaText = sessionStorage.getItem('baka_xml_data');
